@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Sprite Atlas — ローカル画像制作ツール</title>
+  <link rel="stylesheet" href="style.css">
+  <script defer src="atlas-core.js"></script>
+  <script defer src="atlas-render.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <div><span class="eyebrow">LOCAL ASSET TOOL</span><h1>Sprite Atlas</h1></div>
+    <p class="privacy"><span class="status-dot"></span>画像処理はすべて端末内で完結</p>
+  </header>
+  <main class="workspace">
+    <aside class="settings panel" aria-label="アトラス設定">
+      <div class="section-heading"><h2>出力設定</h2><button id="resetSettings" class="text-button" type="button">初期値に戻す</button></div>
+      <form id="settingsForm" novalidate>
+        <fieldset><legend>01 / セルと並び</legend>
+          <div class="form-grid">
+            <label>セル幅 <span>px</span><input name="cellWidth" type="number" min="1" step="1" value="128" required></label>
+            <label>セル高さ <span>px</span><input name="cellHeight" type="number" min="1" step="1" value="128" required></label>
+            <label>セル内余白 <span>px</span><input name="padding" type="number" min="0" step="1" value="8" required></label>
+            <label>列数<input name="columns" type="number" min="1" step="1" value="4" required></label>
+          </div>
+          <label class="check"><input name="pot" type="checkbox">Canvasを2の累乗サイズに拡張</label>
+        </fieldset>
+        <fieldset><legend>02 / 透明余白のトリミング</legend>
+          <div class="form-grid">
+            <label>alphaしきい値<input name="threshold" type="number" min="0" max="255" step="1" value="1" required></label>
+            <label>追加余白 <span>px</span><input name="margin" type="number" min="0" max="8192" step="1" value="0" required></label>
+          </div>
+          <p class="hint">alpha &gt; しきい値を有効画素とします。追加余白はトリムの外側に作る透明な余白です。</p>
+        </fieldset>
+        <fieldset><legend>03 / サイズと配置</legend>
+          <label>スケーリング方式<select name="scaleMode"><option value="individual">Individual Fit — 個別にフィット</option><option value="uniform">Uniform Scale — 全画像を同じ倍率に</option></select></label>
+          <p id="scaleHelp" class="hint"></p>
+          <label class="check"><input name="upscale" type="checkbox" checked>小さい画像の拡大を許可</label>
+          <div class="label-row"><label for="alignment">セル内の配置</label><button id="bottomAlign" type="button" class="text-button">下中央にする</button></div>
+          <select name="alignment" id="alignment"><option value="top-left">左上</option><option value="top-center">上中央</option><option value="top-right">右上</option><option value="center-left">左中央</option><option value="center" selected>中央</option><option value="center-right">右中央</option><option value="bottom-left">左下</option><option value="bottom-center">下中央</option><option value="bottom-right">右下</option></select>
+          <label class="spaced">補間方式<select name="smoothing"><option value="smooth">Smooth — なめらか</option><option value="pixel">Pixel / Nearest — ドットを維持</option></select></label>
+          <p class="hint">Pixelでも倍率と座標は小数になり得ます。整数倍専用のモードではありません。</p>
+        </fieldset>
+      </form>
+    </aside>
+    <section class="main-column">
+      <section class="panel import-panel">
+        <div id="dropZone" class="drop-zone">
+          <div class="import-icon" aria-hidden="true">＋</div>
+          <div><h2>画像をここにドロップ</h2><p>複数画像をまとめて追加 · Ctrl / ⌘ + V で貼り付け</p></div>
+          <button id="pickFiles" type="button">画像を選択</button>
+          <input id="fileInput" type="file" accept="image/*" multiple hidden>
+        </div>
+        <p class="hint">PNG / WebP推奨。画像一覧の順番で、左上から配置します。</p>
+      </section>
+      <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+      <div id="validation" class="notice error" role="alert" hidden></div>
+      <section class="panel preview-panel">
+        <div class="section-heading"><h2>アトラスプレビュー</h2><div class="preview-controls"><label class="check"><input id="showGrid" type="checkbox" checked>セル境界</label><label>表示倍率<select id="zoom"><option value="fit">画面に合わせる</option><option value="0.25">25%</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option><option value="4">400%</option></select></label></div></div>
+        <div id="previewStats" class="stats">画像を追加すると、ここに出力サイズが表示されます。</div>
+        <div id="previewViewport" class="preview-viewport">
+          <div id="emptyPreview" class="empty-state"><div aria-hidden="true">▦</div><h3>スプライトを、ひとつのアトラスに。</h3><p>透明余白を取り除き、セル内に整えて並べます。</p></div>
+          <div id="canvasWrap" class="canvas-wrap checker" hidden><canvas id="atlasCanvas" width="1" height="1" aria-label="生成アトラス"></canvas><div id="gridOverlay" aria-hidden="true"></div></div>
+        </div>
+        <div class="export-bar"><div><strong id="nextFilename">—</strong><p class="hint">透過PNG + 座標インデックスJSON</p></div><button id="exportButton" class="primary" type="button" disabled>PNG + JSON を用意</button></div>
+        <p class="hint">通常ダウンロードで保存します。保存先はブラウザの設定に従います。</p>
+        <div id="downloadPanel" class="download-panel" hidden><h3>書き出しデータの準備ができました</h3><p id="downloadDescription"></p><div class="button-row"><a id="downloadPng" class="button" download>PNG を保存</a><a id="downloadJson" class="button" download>JSON を保存</a><button id="confirmDownloads" type="button" class="primary" disabled>2ファイルの保存完了・番号を進める</button><button id="cancelDownloads" type="button" class="text-button">閉じる</button></div><p class="hint">両方のファイルを保存してから完了を押してください。ブラウザの保存完了は自動判定できません。ここにあるデータは準備時点の内容です。</p></div>
+      </section>
+      <section class="panel images-panel"><div class="section-heading"><h2>入力画像 <span id="imageCount" class="badge">0</span></h2><button id="clearImages" type="button" class="text-button" disabled>すべて削除</button></div><p id="listHelp" class="hint">エラー画像は出力から除外されます。↑ ↓ で配置順を変更できます。</p><div id="imageList" class="image-list" aria-describedby="listHelp"></div><p id="emptyList" class="empty-list">まだ画像がありません。</p></section>
+    </section>
+  </main>
+  <footer>Sprite Atlas · オフライン対応 <a href="README.md" target="_blank">使い方</a><a href="tests.html" target="_blank">自動テスト</a></footer>
+</body>
+</html>

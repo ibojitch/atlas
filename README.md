@@ -14,7 +14,7 @@ Chrome / Edgeの現行デスクトップ版を主対象にしています。file
 
 1. 複数画像を画面へドロップするか、「画像を選択」で追加します。画像をコピーしてCtrl+V / ⌘+Vで貼り付けることもできます。
 2. セル幅・高さ、列数、トリミング、スケーリング方式を設定します。
-3. 入力一覧で名前と順番を調整します。↑ / ↓ ボタンは一つずつ順番を移動します。
+3. 中央の一覧でSpriteを選び、右Inspectorで名前・XY補正を編集します。一覧の↑ / ↓ ボタンはAtlas順を変更します。
 4. プレビューのサイズと配置を確認します。表示倍率とセル境界は出力画像に影響しません。
 5. 「PNG + JSON を用意」を押します。
 6. 「PNG を保存」「JSON を保存」から両方のファイルを保存します。
@@ -23,6 +23,49 @@ Chrome / Edgeの現行デスクトップ版を主対象にしています。file
 読込失敗、完全透明、しきい値を超える画素がない画像は赤く表示され、出力から除外されます。正常な画像の読み込みや出力は継続します。一覧のindexは**出力される画像だけの0始まりの連番**で、エラー画像は「—」です。
 
 「すべて削除」は画像一覧を空にします。入力ファイルそのものは変更しません。画像は再起動後には復元されません。
+
+## 3ペインとSprite Inspector
+
+FHD以上では画面高に合わせた3ペイン構成です。左292pxに出力設定・通常読込・分割追加・抽出設定・書き出し、中央上にAtlasプレビュー、中央下にSprite一覧、右320pxにInspectorを置いています。左と右は内部スクロール、一覧とAtlasプレビューも独立スクロールします。1100px以下では縦方向のページスクロールを許可し、700px以下では1列に切り替えます。
+
+一覧行をクリック、またはキーボードでフォーカスしてEnter/Spaceで選択します。選択行は緑で表示され、index・サムネイル・名前・Group・Order・Durationを確認できます。名前とXY補正はInspectorで編集し、Atlas順の↑/↓と削除は一覧に残しています。初回読込では先頭を選択し、選択Spriteを削除した場合は残る先頭へ移動、全削除ではEmpty Stateになります。
+
+右上の選択SpriteプレビューとAnimation Previewは、既存の `makePlan()` で描画した最終Atlasからセルを切り出す共通処理を使います。scale・trim・9点配置・重心/下端配置・offset・セル境界でのクリップ・補間はAtlasと一致します。表示のCSS縮小以外で座標を計算し直しません。
+
+## Animationの編集とプレビュー
+
+1. Spriteを選択し、右InspectorのGroup IDに例として `walk` を入力します。通常画像と分割画像を同じGroupに入れられます。
+2. 各SpriteのAnimation Orderを0以上の整数、Duration Framesを1以上の整数で設定します。初期値はそれぞれ0と1です。
+3. Group FPSを正の有限数で設定します（初期値60、小数も可）。FPSはSpriteごとでなくGroupごとに1つだけ保持され、同じIDの全Spriteに共有されます。
+4. 「再生」で選択SpriteのGroupを再生し、「停止」で先頭フレームへ戻ります。ループOFFでは最後のフレームで止まります。現在のフレーム番号・Sprite名・Order・Duration・Group・FPSを表示します。
+
+表示時間は **Duration Frames ÷ FPS 秒**。60 FPSなら3 frames = 50ms、6 frames = 100msです。フレームごとに異なる保持時間を指定できます。requestAnimationFrameの経過時間から現在フレームを直接求めるため、描画が遅れても遅延をフレームごとに累積しません。ブラウザの更新頻度より短いフレームは表示されずに飛ぶ場合があります。
+
+**Atlas順とAnimation順は別です。** Atlasは入力一覧の順番、AnimationはGroup一致→Animation Order昇順→同値なら出力Atlas index昇順で決定します。一覧を並べ替えても明示したOrderは変わらず、同値の場合のみAtlas順に従います。
+
+Group IDは前後をtrimし、空欄・空白のみは未所属です。大文字小文字は区別します。内部はMap、出力辞書はObject.create(null)を用い、`__proto__`、`constructor`等も使えます。不正なOrder・Duration・FPSはエラー表示し、出力・再生を止めます。有効画素のないSpriteは従来どおりAtlasから除外され、そのSpriteのAnimationフレームも出力しません。
+
+編集中の設定はプレビューへ即時反映します。再生中にoffset・FPS・Order・Duration等を変更すると更新後のGroupを先頭から再生し直します。別Groupの選択では停止します。画像・Animation設定は再起動時には復元されません。
+
+### JSON version 2のAnimation定義
+
+従来のmeta・sprites座標を維持し、meta.versionを2へ変更しました。各spriteにはgroupId・animationOrder・durationFramesを追加し、トップレベルにanimationsを出力します。Animationなしでも `"animations": {}` を出力します。
+
+```json
+"animations": {
+  "walk": {
+    "fps": 60,
+    "frames": [
+      { "sprite": 2, "duration": 3 },
+      { "sprite": 0, "duration": 6 }
+    ]
+  }
+}
+```
+
+これはJSON内のanimations部分の例です。`frames[].sprite` は **出力Atlasのsprites配列のindex**、`duration` はDuration Framesでありミリ秒ではありません。未所属SpriteやメンバーのいないGroupは含みません。出力準備時にGroup設定もスナップショットするため、その後の編集で準備済みPNG/JSONの内容は変わりません。
+
+既知の制約：1 Spriteにつき所属Groupは1つです。Timeline、Tween、補間Animation、骨・IK、イベント、音声同期、レイヤー合成、複数Atlas、Animation定義の再読込はありません。次の拡張としてプロジェクト保存/復元やフレーム送りを追加しやすい責務分離を維持しています。
 
 ## 各設定
 
@@ -96,7 +139,7 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 ```json
 {
   "meta": {
-    "version": 1,
+    "version": 2,
     "image": "20260916_0000.png",
     "cellWidth": 128,
     "cellHeight": 128,
@@ -129,8 +172,14 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
     "bounds": { "x": 20, "y": 15, "width": 100, "height": 200 },
     "draw": { "x": 36, "y": 8, "width": 56, "height": 112 },
     "contentDraw": { "x": 36, "y": 8, "width": 56, "height": 112 },
-    "scale": 0.56
-  }]
+    "scale": 0.56,
+    "offsetX": 0,
+    "offsetY": 0,
+    "groupId": "",
+    "animationOrder": 0,
+    "durationFrames": 1
+  }],
+  "animations": {}
 }
 ```
 
@@ -159,13 +208,13 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 
 島分けと最小画素数の適用は追加時に固定されます。変更して分割し直すには、対象を削除して再追加してください。抽出時のしきい値以下の画素は透明にし、所属する島だけを保持するので、外接矩形が重なる別の島は混入しません。後からalphaしきい値を変えると、残っている画素でトリム・重心・下端を再計算しますが、除去した画素は復元されず、島の再分割も行いません。低alpha画素の描画は通常画像と同じトリム処理に従います。
 
-制約：横1列専用で複数行は判定しません。接触するキャラは1島、離れた武器・装飾・エフェクトは別島になります。AI認識や部位統合、固定幅分割、レイヤー合成、アニメーション定義はありません。最小画素数を上げると小さいキャラ自体も除外されます。解析中は一時的に画素・ラベル・探索配列を使うため、大きなPNGではメモリ消費と待ち時間が増えます。
+制約：横1列専用で複数行は判定しません。接触するキャラは1島、離れた武器・装飾・エフェクトは別島になります。AI認識や部位統合、固定幅分割、レイヤー合成、自動アニメーション推定はありません。最小画素数を上げると小さいキャラ自体も除外されます。解析中は一時的に画素・ラベル・探索配列を使うため、大きなPNGではメモリ消費と待ち時間が増えます。
 
 抽出画像も既存のSprite Item・`makePlan()`・描画・PNG/JSON出力を共有します。JSONの各spriteに `offsetX` / `offsetY`、抽出画像には `anchor` と `placement: "centroid-bottom"` を追加しています。抽出画像のbounds・anchor座標は切り出した画像内の座標です。描画ソースの準備はapp側、配置計算はcore側、描画はrenderer側に分離したままで、将来の合成済み描画ソースにも拡張可能です。
 
 ## 設定保存
 
-設定キーは`sprite-atlas.settings.v1`、連番キーは`sprite-atlas.sequence.v1`です。全ての出力設定と島の最小画素数を保存し、不正な型・値は初期値に戻します。組み合わせが不正な場合も初期値に戻します。画像、各スプライトのXY補正、プレビュー倍率、セル境界の表示状態は保存しません。
+設定キーは`sprite-atlas.settings.v1`、連番キーは`sprite-atlas.sequence.v1`です。全ての出力設定と島の最小画素数を保存し、不正な型・値は初期値に戻します。組み合わせが不正な場合も初期値に戻します。画像、各スプライトのXY補正・Animation属性、Group FPS、選択状態、再生状態、プレビュー倍率、セル境界の表示状態は保存しません。Animation定義は書き出したJSONに含まれますが、そのJSONの再読み込みは未対応です。
 
 ## File System Access API
 
@@ -192,9 +241,9 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 
 - `index.html` — 日本語UIとローカルスクリプト読込。
 - `style.css` — デスクトップ中心のレスポンシブUI、チェッカー、境界オーバーレイ。
-- `atlas-core.js` — DOM非依存のalpha解析、fit、共通倍率、配置、レイアウト、JSON、名前・連番・設定検証。
-- `atlas-render.js` — 描画計画をCanvasへ描く処理とPNG生成。テストでも同じ処理を利用。
-- `app.js` — 明示的な状態オブジェクト、入力、UI、画像リソースの解放、設定保存、ダウンロード。
+- `atlas-core.js` — DOM非依存のalpha解析、fit、共通倍率、配置、レイアウト、JSON、Animation順序・時間・検証、名前・連番・設定検証。
+- `atlas-render.js` — 描画計画をCanvasへ描く処理、最終Atlasのセルを切り出す共通プレビュー、PNG生成。テストでも同じ処理を利用。
+- `app.js` — 明示的な状態オブジェクト、Sprite選択、Inspector、Group共有FPS、経過時間に基づくrequestAnimationFrame再生、入力、画像リソースの解放、設定保存、ダウンロード。
 - `core-tests.js` — 純粋関数の自動テスト。
 - `tests.html` / `browser-tests.js` — ブラウザ上での計算・PNG画素テスト。
 - `browser-smoke.cjs` — 任意の開発用画面操作テスト。
@@ -203,7 +252,7 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 
 ### Node不要のブラウザテスト
 
-`tests.html`を直接開くと実行します。39項目について計算とPNG生成を検証します。PNGを再デコードし、全画素の色・透明度をJSONの配置と比較します。Nodeの計算テストは32項目で、3島検出、8近傍、透明0件、ゴミ除外、9島拒否、左右順、重心・下端、重なるbboxのマスク、重心fit、XY補正、設定復元を含みます。
+`tests.html`を直接開くと実行します。49項目について計算とPNG生成を検証します。PNGを再デコードし、全画素の色・透明度をJSONの配置と比較します。Nodeの計算テストは41項目で、3島検出、8近傍、透明0件、ゴミ除外、9島拒否、左右順、重心・下端、重なるbboxのマスク、重心fit、XY補正、設定復元を含みます。
 
 ### 任意の開発用テスト
 
@@ -214,6 +263,19 @@ node core-tests.js
 node browser-smoke.cjs
 ```
 
-画面操作テストはNode 22以降とChromeを使用します。ブラウザの場所が異なる場合は環境変数`ATLAS_BROWSER`を実行ファイルの絶対パスに設定できます（Edgeも指定可能）。一時プロファイルを作り、実ユーザーの設定やダウンロード先に触れずにテストします。一時フォルダにスクリーンショットとプロファイルが残ります。
+画面操作テストはNode 22以降とインストール済みChrome / Edgeを使用します。追加npm依存はありません。検出順はATLAS_BROWSER指定→代表的なOS別Chrome/Edgeパス→PATH→既存Chrome for Testingの代表的な展開先/Puppeteerキャッシュです。指定したATLAS_BROWSERが起動できない場合は、別ブラウザへ黙って切り替えずエラーにします。macOS/Linux向けの候補もありますが、実機検証はWindows Chromeです。
 
-ファイル読込、エラー隔離、順番・名前の変更、設定検証、共通倍率、PNGとJSONの寸法、保存番号、PNG/JSON生成失敗、狭幅レイアウト、再起動後の設定復元、分割追加とXY補正を28項目で検証し、続けて39項目のCanvas・PNGテストも実行します。PNGとJSONは一時フォルダへ実際にダウンロードして内容を検査します。対話的な保存ダイアログや、ユーザーの保存先で発生するディスクエラーは自動テストの対象外です。
+PowerShellでの明示指定例：
+
+```powershell
+$env:ATLAS_BROWSER = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+node browser-smoke.cjs
+```
+
+毎回OSのtemporary directoryへ専用user-data-dirを作成し、remote-debugging-port=0で空きポートをChromeに選ばせます。DevToolsActivePortを読み、127.0.0.1の/json/versionを短い間隔で再試行してHTTP 200と当該プロファイルのWebSocket endpointを確認した後に接続します。起動待機15秒・個別CDPコマンド20秒にタイムアウトを設けています。失敗時は実行ファイル、PID、port、user-data-dir、/json/version結果、失敗段階、timeout、Chrome stderrを表示します。
+
+[Chrome公式のremote debugging変更案内](https://developer.chrome.com/blog/remote-debugging-port)に沿い、通常プロファイルは使いません。今回の環境では従来から一時プロファイルとport=0を使用していました。制限環境で再現した停止はHTTP 200の後、GPU子プロセスがアクセス拒否（exit_code=-1073741790）で終了したもので、プロファイル指定不足ではありません。通常のユーザー権限では成功しています。今回の変更でendpoint準備待ち、WebSocketエラー/切断処理、詳細ログを追加し、この違いを判別できるようにしました。OSや実行環境側の制限そのものを無効化する処理は入れていません。
+
+終了時にはChrome終了を待ち、作成した一時ディレクトリがOSのtemporary directory直下のatlas-smoke-*であることを確認してから削除します。失敗時やSIGINT/SIGTERMも可能な範囲で後始末します。OSによる強制終了では一時フォルダが残る場合があります。ユーザーの通常Chromeプロファイルは変更しません。スクリーンショットを残す場合だけATLAS_SCREENSHOTに保存先ファイルの絶対パスを指定してください（既存ファイルは上書きします）。既定ではダウンロードしたテストPNG/JSONも一時プロファイルと一緒に削除します。
+
+画面操作40項目で既存の読込・保存・連番・エラー処理・設定復元に加え、FHD3ペイン、Inspector、Group共有FPS、Animation順、プレビュー全画素、offset反映、時間ベースの遷移、非ループ終端、ループ、選択削除を検証します。続けて49項目の計算・Canvas・PNGテストを実行します。Node単独は41項目です。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。

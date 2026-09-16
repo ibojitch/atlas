@@ -27,5 +27,12 @@
       } catch (error) { reject(new Error(`PNG生成に失敗しました: ${error.message}`)); }
     });
   }
-  window.AtlasRenderer = Object.freeze({ render, pngBlob });
+  // 完成Atlasのセルをそのまま使い、配置・補間・クリップ処理を重複させない。
+  function renderPreview(canvas, atlas, sprite, settings) {
+    canvas.width = sprite?.width || 1; canvas.height = sprite?.height || 1;
+    canvas.style.imageRendering = settings.smoothing === 'pixel' ? 'pixelated' : 'auto';
+    if (!sprite) return;
+    canvas.getContext('2d').drawImage(atlas, sprite.x, sprite.y, sprite.width, sprite.height, 0, 0, sprite.width, sprite.height);
+  }
+  window.AtlasRenderer = Object.freeze({ render, pngBlob, renderPreview });
 })();

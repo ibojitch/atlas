@@ -5,15 +5,83 @@
 'use strict';
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const { spawn } = require('node:child_process'), { pathToFileURL } = require('node:url');
-const executable = process.env.ATLAS_BROWSER || 'C:/Program Files/Google/Chrome/Application/chrome.exe';
-const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-smoke-'));
-const child = spawn(executable, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+let executable, profile, child, spawnError, browserStderr = '', phase = 'browser detection', port, endpointStatus = 'not requested';
+const START_TIMEOUT = 15000, CDP_TIMEOUT = 20000;
+function findBrowser() {
+  if (process.env.ATLAS_BROWSER) return process.env.ATLAS_BROWSER;
+  const candidates = process.platform === 'win32'
+    ? [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA].filter(Boolean).flatMap(root => [path.join(root,'Google/Chrome/Application/chrome.exe'),path.join(root,'Microsoft/Edge/Application/msedge.exe')])
+    : process.platform === 'darwin' ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome','/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge']
+    : ['/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/microsoft-edge'];
+  for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    for (const name of (process.platform === 'win32' ? ['chrome.exe','msedge.exe','chromium.exe'] : ['google-chrome','google-chrome-stable','chromium','chromium-browser','microsoft-edge'])) candidates.push(path.join(dir,name));
+  }
+  // Chrome for Testingの代表的な展開先とPuppeteerの既存キャッシュのみ。ダウンロードはしない。
+  for (const root of [__dirname, path.join(os.homedir(),'.cache/puppeteer/chrome')]) {
+    for (const name of ['chrome-win64/chrome.exe','chrome-win32/chrome.exe','chrome-linux64/chrome','chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing','chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing']) {
+      candidates.push(path.join(root,name));
+      if (root !== __dirname && fs.existsSync(root)) for (const version of fs.readdirSync(root)) candidates.push(path.join(root,version,name));
+    }
+  }
+  return candidates.find(file => { try { return fs.statSync(file).isFile(); } catch { return false; } }) || null;
+}
+function diagnostics(error) {
+  console.error(JSON.stringify({ phase, executable: executable ?? null, pid: child?.pid ?? null, port: port ?? 'not assigned', userDataDir: profile ?? null,
+    jsonVersion: endpointStatus, startupTimeoutMs: START_TIMEOUT, cdpTimeoutMs: CDP_TIMEOUT, error: error.message, stderr: browserStderr }, null, 2));
+}
+async function startBrowser() {
+  executable = findBrowser();
+  if (!executable) throw new Error('Chrome/Edgeが見つかりません。ATLAS_BROWSERを指定してください。');
+  profile = fs.mkdtempSync(path.join(os.tmpdir(), 'atlas-smoke-'));
+  phase = 'browser process startup';
+  child = spawn(executable, ['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--remote-debugging-address=127.0.0.1','--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank'], { windowsHide: true, stdio: ['ignore','ignore','pipe'] });
+  child.on('error', error => { spawnError = error; });
+  child.stderr.on('data', chunk => { browserStderr = (browserStderr + chunk.toString()).slice(-65536); });
+  const deadline = Date.now() + START_TIMEOUT;
+  let version;
+  while (Date.now() < deadline) {
+    if (spawnError) throw new Error('Chrome起動失敗: ' + spawnError.message);
+    if (child.exitCode !== null || child.signalCode) throw new Error('Chromeがendpoint準備前に終了しました。exit=' + child.exitCode);
+    try {
+      const active = fs.readFileSync(path.join(profile,'DevToolsActivePort'),'utf8').split(/\r?\n/);
+      port = Number(active[0]);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('port not ready');
+      phase = 'Chrome started; /json/version readiness';
+      const response = await fetch('http://127.0.0.1:' + port + '/json/version', { signal: AbortSignal.timeout(1000) });
+      endpointStatus = 'HTTP ' + response.status;
+      if (!response.ok) throw new Error(endpointStatus);
+      version = await response.json();
+      const ws = new URL(version.webSocketDebuggerUrl);
+      if (!['127.0.0.1','localhost'].includes(ws.hostname) || Number(ws.port) !== port || ws.pathname !== active[1]) throw new Error('endpoint does not match temporary profile');
+      endpointStatus += ' / ' + version.Browser; break;
+    } catch (error) { endpointStatus = error.message; }
+    await pause(150);
+  }
+  if (!version?.webSocketDebuggerUrl || !endpointStatus.startsWith('HTTP 200')) throw new Error('Chrome起動後の/json/version準備がタイムアウトしました。');
+  console.log('Browser ready: ' + JSON.stringify({ executable, pid:child.pid, port, userDataDir:profile, jsonVersion:endpointStatus }));
+  phase = 'Chrome started; CDP WebSocket connection';
+  await new Promise((resolve,reject) => {
+    const timer = setTimeout(() => reject(new Error('CDP WebSocket接続timeout')), START_TIMEOUT);
+    socket = new WebSocket(version.webSocketDebuggerUrl);
+    socket.addEventListener('message', handleMessage);
+    socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once:true });
+    socket.addEventListener('error', () => { clearTimeout(timer); reject(new Error('CDP WebSocket接続失敗')); }, { once:true });
+    socket.addEventListener('close', () => { clearTimeout(timer); reject(new Error('CDP WebSocket切断')); for(const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('CDP切断')); } pending.clear(); });
+  });
+}
+function handleMessage(event) {
+  const message = JSON.parse(event.data);
+  if (message.id && pending.has(message.id)) { const p = pending.get(message.id); pending.delete(message.id); clearTimeout(p.timer); message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result); }
+  if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
+  if (message.method === 'Page.loadEventFired' && message.sessionId === session && loaded) loaded();
+}
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 let socket, session, nextId = 1, passed = 0, loaded;
 const pending = new Map(), exceptions = [];
-function send(method, params = {}, inPage = true) {
+function send(method, params = {}, inPage = true, timeout = CDP_TIMEOUT) {
   return new Promise((resolve, reject) => {
-    const id = nextId++, timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, 20000);
+    phase = 'Chrome started; CDP ' + method;
+    const id = nextId++, timer = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timeout: ${method}`)); }, timeout);
     pending.set(id, { resolve, reject, timer }); socket.send(JSON.stringify({ id, method, params, ...(inPage ? { sessionId: session } : {}) }));
   });
 }
@@ -35,25 +103,13 @@ async function reload() {
   await send('Page.reload'); await ready;
 }
 async function main() {
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Chrome起動がタイムアウトしました。')), 15000);
-    child.once('error', reject); child.stderr.on('data', chunk => {
-      const match = chunk.toString().match(/DevTools listening on (ws:\/\/\S+)/);
-      if (match && !socket) { socket = new WebSocket(match[1]); socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }); }
-    });
-  });
-  socket.addEventListener('message', event => {
-    const message = JSON.parse(event.data);
-    if (message.id && pending.has(message.id)) { const p = pending.get(message.id); pending.delete(message.id); clearTimeout(p.timer); message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result); }
-    if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
-    if (message.method === 'Page.loadEventFired' && message.sessionId === session && loaded) loaded();
-  });
+  await startBrowser();
   const target = await send('Target.createTarget', { url: 'about:blank' }, false);
   fs.mkdirSync(path.join(profile, 'downloads'));
   await send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: path.join(profile, 'downloads') }, false);
   session = (await send('Target.attachToTarget', { targetId: target.targetId, flatten: true }, false)).sessionId;
   await send('Runtime.enable'); await send('Page.enable');
-  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1080, deviceScaleFactor: 1, mobile: false });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: pathToFileURL(path.join(__dirname, 'index.html')).href });
   await until("!!document.getElementById('nextFilename')?.textContent.includes('.png')");
   await check('file://起動・画像0枚で保存不可', "document.getElementById('exportButton').disabled && document.getElementById('imageCount').textContent === '0'");
@@ -70,12 +126,12 @@ async function main() {
     }; await testImport();`);
   await until("document.getElementById('imageCount').textContent==='5' && !document.getElementById('exportButton').disabled");
   await check('複数ドロップ・個別デコードエラー・透明画像の除外', "document.querySelectorAll('.image-row.has-error').length===2 && document.getElementById('previewStats').textContent.includes('3 スプライト')");
-  await check('重複名の一意化・不透明の案内', "document.querySelectorAll('[data-action=rename]')[1].value==='idle_2' && document.getElementById('imageList').textContent.includes('全面不透明')");
+  await check('重複名の一意化・不透明の案内', "document.querySelectorAll('.sprite-name')[1].textContent==='idle_2' && document.getElementById('imageList').textContent.includes('全面不透明')");
   await evaluate("document.querySelectorAll('.image-row')[1].querySelector('[data-action=up]').click()");
-  await check('並び替え', "document.querySelector('.image-detail input').value==='idle_2'");
-  await evaluate("const input=document.querySelector('.image-detail input');input.value='idle';input.dispatchEvent(new Event('change',{bubbles:true}));testSet('scaleMode','uniform');document.getElementById('bottomAlign').click();");
+  await check('並び替え', "document.querySelector('.sprite-name').textContent==='idle_2'");
+  await evaluate("document.querySelector('.image-row').click();const input=document.getElementById('spriteName');input.value='idle';input.dispatchEvent(new Event('change',{bubbles:true}));testSet('scaleMode','uniform');document.getElementById('bottomAlign').click();");
   await until("!document.getElementById('exportButton').disabled");
-  await check('名前変更の重複回避・下中央ショートカット', "document.querySelector('.image-detail input').value==='idle_2' && document.getElementById('alignment').value==='bottom-center'");
+  await check('名前変更の重複回避・下中央ショートカット', "document.querySelector('.sprite-name').textContent==='idle_2' && document.getElementById('alignment').value==='bottom-center'");
   await evaluate("testSet('padding',64)"); await until("!document.getElementById('validation').hidden");
   await check('描画領域0の設定は書出不可', "document.getElementById('exportButton').disabled");
   await evaluate("testSet('padding',8);testSet('threshold',255)"); await until("document.getElementById('validation').textContent.includes('出力できる画像')");
@@ -103,7 +159,7 @@ async function main() {
   await evaluate("document.getElementById('cancelDownloads').click();document.querySelector('.image-row.has-error [data-action=delete]').click();");
   await check('画像削除', "document.getElementById('imageCount').textContent==='4'");
   const screenshot = await send('Page.captureScreenshot', { format: 'png' });
-  fs.writeFileSync(path.join(profile, 'desktop.png'), Buffer.from(screenshot.data, 'base64'));
+  if (process.env.ATLAS_SCREENSHOT) fs.writeFileSync(path.resolve(process.env.ATLAS_SCREENSHOT), Buffer.from(screenshot.data, 'base64'));
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
   await pause(100);
   const overflow = await evaluate('Array.from(document.querySelectorAll("body *")).filter(e=>e.getBoundingClientRect().right>390).map(e=>({tag:e.tagName,id:e.id,class:e.className,right:e.getBoundingClientRect().right}))');
@@ -115,8 +171,8 @@ async function main() {
   await evaluate(`const fileData=new DataTransfer();fileData.items.add(new File([await (await fetch(document.querySelector('.thumbnail img').src)).blob()],'selected.png',{type:'image/png'}));document.getElementById('fileInput').files=fileData.files;document.getElementById('fileInput').dispatchEvent(new Event('change',{bubbles:true}));`);
   await until("document.getElementById('imageCount').textContent==='6' && !document.getElementById('exportButton').disabled");
   await check('ファイル選択入力の追加', "document.getElementById('imageList').textContent.includes('selected.png') && document.getElementById('fileInput').value===''");
-  await check('通常追加の全Spriteに共通XY入力・初期値0', "document.querySelectorAll('input[data-action=offsetX]').length===6 && Array.from(document.querySelectorAll('input[data-action=offsetX],input[data-action=offsetY]')).every(i=>i.value==='0')");
-  await evaluate(`window.normalBefore=document.getElementById('atlasCanvas').toDataURL();const normalOffset=document.querySelector('input[data-action=offsetX]');normalOffset.value='-3';normalOffset.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('button[data-action=offsetY]').click();`);
+  await check('通常追加の全Spriteに共通XY入力・初期値0', "Array.from(document.querySelectorAll('.image-row')).every(row=>{document.querySelector('[data-id=\"'+row.dataset.id+'\"]').click();return document.getElementById('offsetX').value==='0' && document.getElementById('offsetY').value==='0';})");
+  await evaluate(`document.querySelector('.image-row').click();window.normalBefore=document.getElementById('atlasCanvas').toDataURL();const normalOffset=document.querySelector('input[data-action=offsetX]');normalOffset.value='-3';normalOffset.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('button[data-action=offsetY]').click();`);
   await check('通常追加のXY補正がプレビューへ即時反映', "window.normalBefore!==document.getElementById('atlasCanvas').toDataURL()");
   await evaluate("document.getElementById('exportButton').click()");
   await until("!document.getElementById('downloadPanel').hidden");
@@ -131,9 +187,9 @@ async function main() {
     const input=document.getElementById('splitInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));
   }; await splitTest(3);`);
   await until("document.getElementById('imageCount').textContent==='3' && !document.getElementById('exportButton').disabled");
-  await check('分割追加・連番・検出数表示', "Array.from(document.querySelectorAll('[data-action=rename]')).map(i=>i.value).join(',')==='hero_01,hero_02,hero_03' && document.getElementById('notice').textContent.includes('3キャラクター')");
-  await check('分割追加の全Spriteに共通XY入力・初期値0', "document.querySelectorAll('input[data-action=offsetX]').length===3 && Array.from(document.querySelectorAll('input[data-action=offsetX],input[data-action=offsetY]')).every(i=>i.value==='0')");
-  await evaluate(`window.beforeOffset=document.getElementById('atlasCanvas').toDataURL();const offset=document.querySelector('input[data-action=offsetX]');offset.value='-3';offset.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('button[data-action=offsetY]').click();`);
+  await check('分割追加・連番・検出数表示', "Array.from(document.querySelectorAll('.sprite-name')).map(i=>i.textContent).join(',')==='hero_01,hero_02,hero_03' && document.getElementById('notice').textContent.includes('3キャラクター')");
+  await check('分割追加の全Spriteに共通XY入力・初期値0', "Array.from(document.querySelectorAll('.image-row')).every(row=>{document.querySelector('[data-id=\"'+row.dataset.id+'\"]').click();return document.getElementById('offsetX').value==='0' && document.getElementById('offsetY').value==='0';})");
+  await evaluate(`document.querySelector('.image-row').click();window.beforeOffset=document.getElementById('atlasCanvas').toDataURL();const offset=document.querySelector('input[data-action=offsetX]');offset.value='-3';offset.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('button[data-action=offsetY]').click();`);
   await check('offset変更がプレビューへ即時反映', "window.beforeOffset!==document.getElementById('atlasCanvas').toDataURL()");
   await evaluate("document.getElementById('exportButton').click()");
   await until("!document.getElementById('downloadPanel').hidden");
@@ -144,6 +200,39 @@ async function main() {
   await evaluate("splitTest(0)");
   await until("document.getElementById('notice').textContent.includes('0キャラクター')");
   await check('透明PNGは0件を案内', "document.getElementById('imageCount').textContent==='3'");
+  await send('Emulation.setDeviceMetricsOverride', { width:1920,height:1080,deviceScaleFactor:1,mobile:false });
+  await evaluate(`window.editSprite=(id,value)=>{const el=document.getElementById(id);el.value=value;el.dispatchEvent(new Event('input',{bubbles:true}));};
+    window.selectSprite=index=>document.querySelectorAll('.image-row')[index].click();
+    selectSprite(0);editSprite('groupId',' walk ');editSprite('animationOrder',2);editSprite('durationFrames',3);editSprite('groupFps',60);
+    selectSprite(1);editSprite('groupId','walk');editSprite('animationOrder',0);editSprite('durationFrames',6);
+  `);
+  await check('Group共有FPSとSprite属性・選択状態', "document.getElementById('groupFps').value==='60' && document.querySelectorAll('.image-row.selected').length===1 && document.querySelectorAll('.animation-summary')[0].textContent.includes('Order: 2')");
+  await check('FHD3ペイン・ページ固定高さ・独立スクロール', "document.documentElement.scrollHeight<=1080 && document.querySelector('.settings').getBoundingClientRect().width>=280 && document.querySelector('.settings').getBoundingClientRect().width<=300 && document.querySelector('.inspector').getBoundingClientRect().left>document.querySelector('.main-column').getBoundingClientRect().right && ['.settings','.inspector','.image-list','#previewViewport'].every(s=>getComputedStyle(document.querySelector(s)).overflowY==='auto')");
+  await evaluate("document.getElementById('exportButton').click()"); await until("!document.getElementById('downloadPanel').hidden");
+  await evaluate("window.animationJSON=await (await fetch(document.getElementById('downloadJson').href)).json()");
+  await check('JSON version2・Animation順とAtlas index・duration', "animationJSON.meta.version===2 && JSON.stringify(animationJSON.animations.walk)==='{\"fps\":60,\"frames\":[{\"sprite\":1,\"duration\":6},{\"sprite\":0,\"duration\":3}]}'");
+  await evaluate(`window.previewMatches=(id,index)=>{const s=animationJSON.sprites[index], atlas=document.getElementById('atlasCanvas'), c=document.getElementById(id);const expected=atlas.getContext('2d').getImageData(s.x,s.y,s.width,s.height).data;return c.width===s.width && c.height===s.height && c.getContext('2d').getImageData(0,0,c.width,c.height).data.every((v,i)=>v===expected[i]);};`);
+  await check('選択SpriteとAnimation Previewの画素はAtlasセルと一致', "previewMatches('selectedCanvas',1) && previewMatches('animationCanvas',1)");
+  await evaluate("document.getElementById('cancelDownloads').click();editSprite('offsetX',4)");
+  await check('offset変更が選択/Animation Previewへ即時反映', "previewMatches('selectedCanvas',1) && previewMatches('animationCanvas',1)");
+  await evaluate("editSprite('groupFps',10);document.getElementById('loopAnimation').checked=false;document.getElementById('playAnimation').click()");
+  await until("document.getElementById('animationCanvas').dataset.spriteIndex==='0'");
+  await check('requestAnimationFrameによる時間ベースの遷移', "document.getElementById('animationFrameInfo').textContent.includes('Order 2') && previewMatches('animationCanvas',0)");
+  await until("document.getElementById('stopAnimation').disabled");
+  await check('非ループ再生の終端で停止し最終フレームを保持', "!document.getElementById('playAnimation').disabled && document.getElementById('animationCanvas').dataset.spriteIndex==='0'");
+  await evaluate("document.getElementById('loopAnimation').checked=true;document.getElementById('playAnimation').click()");
+  await until("document.getElementById('animationCanvas').dataset.spriteIndex==='0'");
+  await until("document.getElementById('animationCanvas').dataset.spriteIndex==='1'");
+  await check('ループで先頭へ戻り再生を継続', "!document.getElementById('stopAnimation').disabled");
+  await evaluate("document.getElementById('stopAnimation').click();editSprite('groupFps',24);selectSprite(0)");
+  await check('FPS編集がGroup全体へ即時反映・停止操作', "document.getElementById('groupFps').value==='24' && document.getElementById('animationInfo').textContent.includes('24 FPS') && document.getElementById('stopAnimation').disabled");
+  await evaluate("editSprite('groupFps',0)");
+  await check('不正Animation設定は出力/再生を禁止', "document.getElementById('exportButton').disabled && document.getElementById('playAnimation').disabled && document.getElementById('validation').textContent.includes('FPS')");
+  await evaluate("editSprite('groupFps',24);document.querySelector('.image-row.selected [data-action=delete]').click()");
+  await check('選択Sprite削除後の安全な再選択', "!document.getElementById('inspectorContent').hidden && document.getElementById('spriteName').value==='hero_02' && document.querySelectorAll('.image-row.selected').length===1");
+  if (process.env.ATLAS_SCREENSHOT) { const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.resolve(process.env.ATLAS_SCREENSHOT),Buffer.from(shot.data,'base64')); }
+  await evaluate("document.getElementById('clearImages').click()");
+  await check('全削除時にInspector Empty State・再生停止', "!document.getElementById('inspectorEmpty').hidden && document.getElementById('playAnimation').disabled && document.getElementById('selectedCanvas').width===1");
   await evaluate("localStorage.setItem('sprite-atlas.settings.v1','{broken')");
   await reload();
   await check('壊れた保存JSONで初期値へ復帰', "document.getElementById('settingsForm').elements.scaleMode.value==='individual' && document.getElementById('notice').textContent.includes('初期値')");
@@ -156,9 +245,25 @@ async function main() {
   console.log('PASS Canvas / PNG / core tests: ' + await evaluate("document.getElementById('testSummary').textContent"));
   if (exceptions.length) throw new Error(JSON.stringify(exceptions));
   console.log(`${passed}/${passed} browser smoke checks passed; no uncaught exceptions`);
-  console.log('Screenshot: ' + path.join(profile, 'desktop.png'));
+  if (process.env.ATLAS_SCREENSHOT) console.log('Screenshot: ' + path.resolve(process.env.ATLAS_SCREENSHOT));
 }
-main().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => {
-  if (socket?.readyState === WebSocket.OPEN) { try { await send('Browser.close', {}, false); } catch {} socket.close(); }
-  child.kill();
-});
+let cleanupPromise;
+function cleanup() {
+  return cleanupPromise ??= (async () => {
+    if (socket?.readyState === WebSocket.OPEN) { try { await send('Browser.close', {}, false, 2000); } catch {} socket.close(); }
+    else if (socket) socket.close();
+    if (child?.pid && child.exitCode === null && !child.signalCode) {
+      for (let n=0;n<20 && child.exitCode===null && !child.signalCode;n++) await pause(100);
+      if (child.exitCode===null && !child.signalCode) child.kill();
+      for (let n=0;n<30 && child.exitCode===null && !child.signalCode;n++) await pause(100);
+    }
+    if (profile && fs.existsSync(profile)) {
+      const root = fs.realpathSync(os.tmpdir()), target = fs.realpathSync(profile);
+      if (path.dirname(target) !== root || !path.basename(target).startsWith('atlas-smoke-')) throw new Error('一時プロファイルの削除範囲を確認できません。');
+      await fs.promises.rm(target, { recursive:true, force:true, maxRetries:10, retryDelay:200 });
+      console.log('Temporary profile removed: ' + target);
+    }
+  })();
+}
+for (const signal of ['SIGINT','SIGTERM']) process.once(signal, () => { process.exitCode=1; cleanup().catch(console.error); });
+main().catch(error => { diagnostics(error); process.exitCode=1; }).finally(() => cleanup().catch(error => { console.error('Cleanup failed: ' + error.message); process.exitCode=1; }));

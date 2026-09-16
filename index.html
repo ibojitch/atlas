@@ -47,8 +47,6 @@
           <p class="hint">Pixelでも倍率と座標は小数になり得ます。整数倍専用のモードではありません。</p>
         </fieldset>
       </form>
-    </aside>
-    <section class="main-column">
       <section class="panel import-panel">
         <div id="dropZone" class="drop-zone">
           <div class="import-icon" aria-hidden="true">＋</div>
@@ -61,6 +59,13 @@
         <input id="splitInput" type="file" accept="image/png,.png" hidden>
         <p class="hint">透過PNG・横1列・最大8島。抽出キャラは重心X／下端Yで配置します。島分けの変更は削除して再追加してください。</p>
       </section>
+      <section class="export-panel" aria-label="書き出し">
+        <div class="export-bar"><div><strong id="nextFilename">—</strong><p class="hint">透過PNG + 座標インデックスJSON</p></div><button id="exportButton" class="primary" type="button" disabled>PNG + JSON を用意</button></div>
+        <p class="hint">通常ダウンロードで保存します。保存先はブラウザの設定に従います。</p>
+        <div id="downloadPanel" class="download-panel" hidden><h3>書き出しデータの準備ができました</h3><p id="downloadDescription"></p><div class="button-row"><a id="downloadPng" class="button" download>PNG を保存</a><a id="downloadJson" class="button" download>JSON を保存</a><button id="confirmDownloads" type="button" class="primary" disabled>2ファイルの保存完了・番号を進める</button><button id="cancelDownloads" type="button" class="text-button">閉じる</button></div><p class="hint">両方のファイルを保存してから完了を押してください。ブラウザの保存完了は自動判定できません。ここにあるデータは準備時点の内容です。</p></div>
+      </section>
+    </aside>
+    <section class="main-column">
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <div id="validation" class="notice error" role="alert" hidden></div>
       <section class="panel preview-panel">
@@ -70,12 +75,43 @@
           <div id="emptyPreview" class="empty-state"><div aria-hidden="true">▦</div><h3>スプライトを、ひとつのアトラスに。</h3><p>透明余白を取り除き、セル内に整えて並べます。</p></div>
           <div id="canvasWrap" class="canvas-wrap checker" hidden><canvas id="atlasCanvas" width="1" height="1" aria-label="生成アトラス"></canvas><div id="gridOverlay" aria-hidden="true"></div></div>
         </div>
-        <div class="export-bar"><div><strong id="nextFilename">—</strong><p class="hint">透過PNG + 座標インデックスJSON</p></div><button id="exportButton" class="primary" type="button" disabled>PNG + JSON を用意</button></div>
-        <p class="hint">通常ダウンロードで保存します。保存先はブラウザの設定に従います。</p>
-        <div id="downloadPanel" class="download-panel" hidden><h3>書き出しデータの準備ができました</h3><p id="downloadDescription"></p><div class="button-row"><a id="downloadPng" class="button" download>PNG を保存</a><a id="downloadJson" class="button" download>JSON を保存</a><button id="confirmDownloads" type="button" class="primary" disabled>2ファイルの保存完了・番号を進める</button><button id="cancelDownloads" type="button" class="text-button">閉じる</button></div><p class="hint">両方のファイルを保存してから完了を押してください。ブラウザの保存完了は自動判定できません。ここにあるデータは準備時点の内容です。</p></div>
       </section>
-      <section class="panel images-panel"><div class="section-heading"><h2>入力画像 <span id="imageCount" class="badge">0</span></h2><button id="clearImages" type="button" class="text-button" disabled>すべて削除</button></div><p id="listHelp" class="hint">エラー画像は出力から除外されます。↑ ↓ で配置順を変更できます。</p><div id="imageList" class="image-list" aria-describedby="listHelp"></div><p id="emptyList" class="empty-list">まだ画像がありません。</p></section>
+      <section class="panel images-panel"><div class="section-heading"><h2>入力画像 <span id="imageCount" class="badge">0</span></h2><button id="clearImages" type="button" class="text-button" disabled>すべて削除</button></div><p id="listHelp" class="hint">行を選択して右側で編集。↑ ↓ はAtlas順を変更します。エラー画像は出力から除外されます。</p><div id="imageList" class="image-list" aria-describedby="listHelp"></div><p id="emptyList" class="empty-list">まだ画像がありません。</p></section>
     </section>
+    <aside id="inspector" class="panel inspector" aria-label="Sprite Inspector">
+      <h2>Sprite Inspector</h2>
+      <p id="inspectorEmpty" class="empty-list">一覧からSpriteを選択してください。</p>
+      <div id="inspectorContent" hidden>
+        <div class="sprite-preview checker"><canvas id="selectedCanvas" width="1" height="1" aria-label="選択Spriteの最終セル配置"></canvas></div>
+        <p id="selectedStatus" class="hint"></p>
+        <form id="spriteForm" novalidate>
+          <label>名前<input id="spriteName" data-action="rename" maxlength="200"></label>
+          <div class="offset-controls">
+            <label>offsetX<input id="offsetX" data-action="offsetX" type="number" step="1" required></label>
+            <button type="button" data-action="offsetX" data-delta="-1" aria-label="Xを1px減らす">−1</button><button type="button" data-action="offsetX" data-delta="1" aria-label="Xを1px増やす">+1</button>
+            <label>offsetY<input id="offsetY" data-action="offsetY" type="number" step="1" required></label>
+            <button type="button" data-action="offsetY" data-delta="-1" aria-label="Yを1px減らす">−1</button><button type="button" data-action="offsetY" data-delta="1" aria-label="Yを1px増やす">+1</button>
+          </div>
+          <p id="placementHelp" class="hint"></p>
+          <fieldset class="spaced"><legend>Animation</legend>
+            <label>Group ID<input id="groupId" maxlength="200" placeholder="未所属"></label>
+            <div class="form-grid spaced">
+              <label>Animation Order<input id="animationOrder" type="number" min="0" step="1" required></label>
+              <label>Duration Frames<input id="durationFrames" type="number" min="1" step="1" required></label>
+            </div>
+            <label class="spaced">Group FPS<input id="groupFps" type="number" min="0" step="any" required></label>
+            <p class="hint">FPSは同じGroupで共有。表示秒数 = Duration Frames ÷ FPS。Atlas順とは独立した再生順です。</p>
+          </fieldset>
+        </form>
+        <section class="animation-preview-section spaced" aria-label="Animation Preview">
+          <h3>Animation Preview</h3>
+          <p id="animationInfo" class="hint">Group IDを設定するとプレビューできます。</p>
+          <div class="sprite-preview checker"><canvas id="animationCanvas" width="1" height="1" aria-label="Animationの最終セル配置"></canvas></div>
+          <div class="button-row"><button id="playAnimation" type="button" disabled>再生</button><button id="stopAnimation" type="button" disabled>停止</button><label class="check"><input id="loopAnimation" type="checkbox" checked>ループ</label></div>
+          <p id="animationFrameInfo" class="hint" aria-live="off"></p>
+        </section>
+      </div>
+    </aside>
   </main>
   <footer>Sprite Atlas · オフライン対応 <a href="README.md" target="_blank">使い方</a><a href="tests.html" target="_blank">自動テスト</a></footer>
 </body>

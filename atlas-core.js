@@ -180,23 +180,89 @@
       return { index, name: item.name, source: item.source, ...cellPosition(index, s),
         width: s.cellWidth, height: s.cellHeight, sourceWidth: item.width, sourceHeight: item.height,
         trim: { ...item.trim }, bounds: { ...item.bounds }, draw, contentDraw, scale,
-        offsetX, offsetY, ...(item.anchor ? { anchor: { ...item.anchor }, placement: 'centroid-bottom' } : {}) };
+        offsetX, offsetY, ...animationProperties(item), ...(item.anchor ? { anchor: { ...item.anchor }, placement: 'centroid-bottom' } : {}) };
     });
     return { ...size, sprites };
   }
-  function metadata(plan, s, image) {
-    return { meta: { version: 1, image, cellWidth: s.cellWidth, cellHeight: s.cellHeight,
+  function metadata(plan, s, image, groups = new Map()) {
+    return { meta: { version: 2, image, cellWidth: s.cellWidth, cellHeight: s.cellHeight,
       columns: plan.columns, rows: plan.rows, atlasWidth: plan.width, atlasHeight: plan.height,
       contentWidth: plan.contentWidth, contentHeight: plan.contentHeight,
       scaleMode: s.scaleMode, alignment: s.alignment, padding: s.padding,
       alphaThreshold: s.threshold, trimMargin: s.margin, smoothing: s.smoothing,
-      powerOfTwo: s.pot, upscale: s.upscale }, sprites: plan.sprites };
+      powerOfTwo: s.pot, upscale: s.upscale }, sprites: plan.sprites, animations: buildAnimations(plan.sprites, groups) };
   }
   function uniqueName(proposed, used) {
     const base = String(proposed).trim() || 'sprite';
     let name = base, suffix = 2;
     while (used.has(name)) name = `${base}_${suffix++}`;
     return name;
+  }
+  const ANIMATION_DEFAULTS = Object.freeze({ groupId: '', animationOrder: 0, durationFrames: 1 });
+  function animationProperties(item) {
+    const p = { ...ANIMATION_DEFAULTS };
+    for (const key of Object.keys(p)) if (item[key] !== undefined) p[key] = item[key];
+    if (typeof p.groupId !== 'string') throw new Error('Group IDは文字列にしてください。');
+    p.groupId = p.groupId.trim();
+    if (!Number.isSafeInteger(p.animationOrder) || p.animationOrder < 0) throw new Error('Animation Orderは0以上の整数にしてください。');
+    if (!Number.isSafeInteger(p.durationFrames) || p.durationFrames < 1) throw new Error('Duration Framesは1以上の整数にしてください。');
+    return p;
+  }
+  function validateFps(fps) {
+    if (typeof fps !== 'number' || !Number.isFinite(fps) || fps <= 0) throw new Error('FPSは正の有限数にしてください。');
+    return fps;
+  }
+  function validateAnimations(items, groups) {
+    const errors = [];
+    for (const item of items) {
+      try {
+        const p = animationProperties(item);
+        if (p.groupId) validateFps(groupFps(groups, p.groupId));
+      } catch (error) { errors.push(`${item.name}: ${error.message}`); }
+    }
+    return [...new Set(errors)];
+  }
+  function durationMs(durationFrames, fps) {
+    validateFps(fps);
+    if (!Number.isSafeInteger(durationFrames) || durationFrames < 1) throw new Error('Duration Framesは1以上の整数にしてください。');
+    const ms = durationFrames / fps * 1000;
+    if (!Number.isFinite(ms) || ms <= 0) throw new Error('Animationの再生時間が数値の範囲を超えています。');
+    return ms;
+  }
+  function groupFps(groups, id) { return groups.has(id) ? groups.get(id)?.fps : 60; }
+  function buildAnimations(sprites, groups = new Map()) {
+    const members = new Map(), animations = Object.create(null);
+    for (const sprite of sprites) {
+      const props = animationProperties(sprite);
+      if (!props.groupId) continue;
+      if (!members.has(props.groupId)) members.set(props.groupId, []);
+      members.get(props.groupId).push({ ...props, index: sprite.index });
+    }
+    for (const [id, list] of members) {
+      const fps = validateFps(groupFps(groups, id));
+      list.sort((a, b) => a.animationOrder - b.animationOrder || a.index - b.index);
+      const frames = list.map(s => ({ sprite: s.index, duration: s.durationFrames }));
+      const total = frames.reduce((sum, f) => sum + durationMs(f.duration, fps), 0);
+      if (!Number.isFinite(total)) throw new Error('Animationの合計再生時間が大きすぎます。');
+      animations[id] = { fps, frames };
+    }
+    return animations;
+  }
+  /** 経過時間から直接フレームを求め、描画遅延による速度の累積ずれを防ぐ。 */
+  function animationFrameAt(animation, elapsedMs, loop = true) {
+    if (!animation?.frames.length) return null;
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) throw new Error('経過時間は0以上の有限数にしてください。');
+    const durations = animation.frames.map(f => durationMs(f.duration, animation.fps));
+    const total = durations.reduce((a, b) => a + b, 0);
+    if (!Number.isFinite(total)) throw new Error('Animationの合計再生時間が大きすぎます。');
+    const done = !loop && elapsedMs >= total;
+    let index = durations.length - 1;
+    if (!done) {
+      const time = loop ? elapsedMs % total : elapsedMs;
+      let end = 0;
+      for (let i = 0; i < durations.length; i++) { end += durations[i]; if (time < end) { index = i; break; } }
+    }
+    return { index, sprite: animation.frames[index].sprite, done };
   }
   function localDate(date = new Date()) {
     return `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
@@ -207,7 +273,8 @@
   function basename(date, number) { return `${date}_${String(number).padStart(4, '0')}`; }
   const api = { DEFAULTS, LIMITS, ALIGNMENTS, validateSettings, restoreSettings, analyzeAlpha, alphaBounds,
     addMargin, fitScale, uniformScale, align, nextPowerOfTwo, layout, cellPosition, makePlan, metadata,
-    uniqueName, localDate, nextSequence, basename, detectIslands, cropIsland, alphaAnchor };
+    uniqueName, localDate, nextSequence, basename, detectIslands, cropIsland, alphaAnchor,
+    ANIMATION_DEFAULTS, animationProperties, validateFps, validateAnimations, durationMs, buildAnimations, animationFrameAt };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AtlasCore = Object.freeze(api);
 })(typeof globalThis !== 'undefined' ? globalThis : this);

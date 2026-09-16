@@ -129,6 +129,54 @@
       equal(after.scale, before.scale); equal([after.offsetX, after.offsetY], [3, -2]);
     }
   });
+  const animated = (name, groupId, animationOrder, durationFrames) => ({ ...item(10,20,name), groupId, animationOrder, durationFrames });
+  test('Animation未所属・空白のみを除外し従来用途もversion2で出力', () => {
+    const s=settings(), p=C.makePlan([item(10,20),animated('b','  ',0,1)],s), json=C.metadata(p,s,'test.png');
+    equal(Object.keys(json.animations),[]); equal(json.meta.version,2); equal(json.sprites,p.sprites);
+  });
+  test('同一Groupはtrimして集約・order昇順・同値はAtlas順・duration出力', () => {
+    const s=settings(), p=C.makePlan([animated('a',' walk ',2,3),animated('b','walk',0,6),animated('c','walk',2,9)],s);
+    const groups=new Map([['walk',{id:'walk',fps:24}]]), json=C.metadata(p,s,'a.png',groups);
+    equal(json.animations.walk,{fps:24,frames:[{sprite:1,duration:6},{sprite:0,duration:3},{sprite:2,duration:9}]});
+    equal(p.sprites.map(i=>i.name),['a','b','c']); equal(p.sprites[0].groupId,'walk');
+  });
+  test('FPSはGroupごとに共有・複数Group独立・未使用Groupは出力しない', () => {
+    const s=settings(), p=C.makePlan([animated('a','a',0,1),animated('b','a',1,2),animated('c','b',0,1)],s);
+    const groups=new Map([['a',{fps:30}],['b',{fps:12}],['unused',{fps:1}]]);
+    const json=C.metadata(p,s,'a.png',groups); equal(Object.keys(json.animations),['a','b']); equal(json.animations.a.fps,30); equal(json.animations.b.fps,12);
+    equal(p.sprites.some(s=>Object.hasOwn(s,'fps')),false); groups.set('a',{fps:60}); equal(C.metadata(p,s,'a.png',groups).animations.a.fps,60);
+  });
+  test('60fpsで3f=50ms・6f=100ms', () => { near(C.durationMs(3,60),50); near(C.durationMs(6,60),100); });
+  test('不正FPS・duration・order・group型を拒否', () => {
+    for(const fps of [0,-1,NaN,Infinity,'60',null]) throws(()=>C.durationMs(3,fps));
+    for(const durationFrames of [0,-1,1.5,NaN,Infinity,null]) throws(()=>C.makePlan([animated('a','walk',0,durationFrames)],settings()));
+    for(const animationOrder of [-1,.5,NaN,Infinity,null]) throws(()=>C.makePlan([animated('a','walk',animationOrder,1)],settings()));
+    throws(()=>C.animationProperties({groupId:{}}));
+    const p=C.makePlan([animated('a','walk',0,1)],settings()); throws(()=>C.buildAnimations(p.sprites,new Map([['walk',{fps:0}]])));
+    equal(C.validateAnimations([animated('a','walk',-1,1)],new Map()).length,1);
+  });
+  test('特殊Group IDも安全にJSON往復', () => {
+    const p=C.makePlan(['__proto__','constructor','toString'].map(name=>animated(name,name,0,1)),settings());
+    const json=C.metadata(p,settings(),'a.png'); equal(Object.getPrototypeOf(json.animations),null);
+    const roundtrip=JSON.parse(JSON.stringify(json)); equal(roundtrip.animations.__proto__.frames,[{sprite:0,duration:1}]); equal(roundtrip.animations.constructor.fps,60);
+  });
+  test('Atlas並べ替えは明示Animation順を変えずindex参照だけ更新', () => {
+    const a=animated('a','walk',2,3), b=animated('b','walk',1,6), s=settings();
+    for(const items of [[a,b],[b,a]]) { const p=C.makePlan(items,s), j=C.metadata(p,s,'a.png'); equal(j.animations.walk.frames.map(f=>j.sprites[f.sprite].name),['b','a']); }
+  });
+  test('通常・抽出を同じAnimationへ追加・offsetとmeta/spritesの整合', () => {
+    const a=animated('normal','walk',1,3), b=animated('split','walk',0,6); b.anchor={centroidX:2,bottomY:19}; b.offsetX=3; b.offsetY=-2;
+    const s=settings(), p=C.makePlan([a,b],s), j=C.metadata(p,s,'a.png');
+    equal(j.animations.walk.frames.map(f=>f.sprite),[1,0]); equal(j.sprites,p.sprites); equal(j.meta.atlasWidth,p.width);
+    for(const f of j.animations.walk.frames) equal(j.sprites[f.sprite].durationFrames,f.duration);
+  });
+  test('経過時間再生の境界・遅延・ループ・非ループ終端', () => {
+    const a={fps:60,frames:[{sprite:2,duration:3},{sprite:0,duration:6}]};
+    equal(C.animationFrameAt(a,0),{index:0,sprite:2,done:false}); equal(C.animationFrameAt(a,49).sprite,2);
+    equal(C.animationFrameAt(a,50).sprite,0); equal(C.animationFrameAt(a,149).sprite,0); equal(C.animationFrameAt(a,150).sprite,2);
+    equal(C.animationFrameAt(a,150*1000+75).sprite,0); equal(C.animationFrameAt(a,999,false),{index:1,sprite:0,done:true});
+    equal(C.animationFrameAt({fps:60,frames:[]},0),null); throws(()=>C.animationFrameAt(a,-1));
+  });
   function run() { return tests.map(t => { try { t.run(); return { name: t.name, ok: true }; } catch (e) { return { name: t.name, ok: false, error: e.message }; } }); }
   if (typeof module !== 'undefined' && module.exports) {
     const results = run(); results.forEach(r => console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`));

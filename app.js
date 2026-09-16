@@ -6,10 +6,11 @@
   const form = $('settingsForm');
   const SETTINGS_KEY = 'sprite-atlas.settings.v1', SEQUENCE_KEY = 'sprite-atlas.sequence.v1';
   // imageは描画用ソース。将来のレイヤー合成もこの境界で用意し、配置計算には持ち込まない。
-  /** @typedef {{id:number,source:string,name:string,width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null,offsetX:number,offsetY:number,extracted?:boolean,anchor?:object|null}} SourceItem */
+  /** @typedef {{id:number,source:string,name:string,width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null,offsetX:number,offsetY:number,groupId:string,animationOrder:number,durationFrames:number,extracted?:boolean,anchor?:object|null}} SourceItem */
   const state = { settings: { ...C.DEFAULTS }, items: [], nextId: 1, busy: false, saving: false,
-    plan: null, validItems: [], pending: null, totalPixels: 0, sequence: null,
+    selectedItemId: null, groups: new Map(), plan: null, validItems: [], pending: null, totalPixels: 0, sequence: null,
     timer: null, queue: Promise.resolve(), storageWarning: false };
+  const playback = { raf: null, playing: false, start: 0, groupId: '', animation: null, frameIndex: -1 };
 
   function message(text, kind = 'info') {
     $('notice').textContent = text; $('notice').className = `notice ${kind}`; $('notice').hidden = !text;
@@ -74,6 +75,7 @@
       ? '全画像に共通の倍率を適用。ポーズによる大きさのばらつきを抑えます。アニメーション向け。'
       : '各画像がセル内で最大になるよう個別に拡大・縮小します。アイコンやアイテム向け。';
     const errors = C.validateSettings(state.settings);
+    errors.push(...C.validateAnimations(state.items, state.groups));
     state.validItems = [];
     if (!errors.length) {
       for (const item of state.items) {
@@ -87,6 +89,7 @@
       if (state.validItems.length) {
         try {
           const plan = C.makePlan(state.validItems, state.settings);
+          C.buildAnimations(plan.sprites, state.groups);
           R.render($('atlasCanvas'), state.validItems, plan, state.settings);
           state.plan = plan;
         } catch (error) { errors.push(error.message); }
@@ -101,7 +104,8 @@
       $('atlasCanvas').width = 1; $('atlasCanvas').height = 1;
       $('previewStats').textContent = errors.length ? '設定または画像を確認してください。' : '画像を追加すると、ここに出力サイズが表示されます。';
     }
-    if (refreshList) renderList(); resizePreview(); updateButtons(); updateFilename();
+    if (!state.items.some(i => i.id === state.selectedItemId)) state.selectedItemId = state.items[0]?.id ?? null;
+    if (refreshList) renderList(); renderInspector(refreshList); resizePreview(); updateButtons(); updateFilename();
   }
   function resizePreview() {
     if (!state.plan) return;
@@ -130,21 +134,11 @@
       if (item.thumb) { const img = element('img'); img.src = item.thumb; img.alt = ''; thumbnail.append(img); }
       else thumbnail.textContent = item.error ? '!' : '…';
       row.append(thumbnail);
-      const detail = element('div', 'image-detail'), input = element('input');
-      input.value = item.name; input.maxLength = 200; input.dataset.action = 'rename'; input.setAttribute('aria-label', `${item.source} のスプライト名`);
-      detail.append(input);
-      const offsets = element('div', 'offset-controls');
-      for (const axis of ['X', 'Y']) {
-        const label = element('label', '', `offset${axis} `), field = element('input');
-        field.type = 'number'; field.step = '1'; field.value = item[`offset${axis}`]; field.dataset.action = `offset${axis}`;
-        field.setAttribute('aria-label', `${item.name} offset${axis}（px）`); label.append(field); offsets.append(label);
-        for (const delta of [-1, 1]) {
-          const button = element('button', '', delta < 0 ? '−1' : '+1'); button.type = 'button';
-          button.dataset.action = `offset${axis}`; button.dataset.delta = delta;
-          button.setAttribute('aria-label', `${item.name} ${axis} ${delta > 0 ? '+' : ''}${delta}px`); offsets.append(button);
-        }
-      }
-      detail.append(element('div', 'hint', item.extracted ? '重心X・下端Y基準 / 補正は出力px' : '9点配置基準 / 補正は出力px')); detail.append(offsets);
+      row.classList.toggle('selected', item.id === state.selectedItemId);
+      row.tabIndex = 0; row.setAttribute('aria-label', item.name); row.setAttribute('aria-current', String(item.id === state.selectedItemId));
+      const detail = element('div', 'image-detail');
+      detail.append(element('strong', 'sprite-name', item.name));
+      detail.append(element('div', 'animation-summary hint', `Group: ${item.groupId || '未所属'} · Order: ${item.animationOrder} · Duration: ${item.durationFrames}f`));
       const source = element('div', 'source-name', item.source); source.title = item.source; detail.append(source);
       detail.append(element('div', 'dimensions', item.width ? `${item.width} × ${item.height} → ${item.trim ? `${item.trim.width} × ${item.trim.height} px` : '—'}` : 'サイズ未取得'));
       let status = item.error;
@@ -160,6 +154,67 @@
     }
     list.replaceChildren(fragment); list.scrollTop = scroll;
     $('imageCount').textContent = state.items.length; $('emptyList').hidden = !!state.items.length;
+  }
+  function selectedItem() { return state.items.find(i => i.id === state.selectedItemId); }
+  function selectItem(id) {
+    const focusRow = document.activeElement?.classList.contains('image-row');
+    state.selectedItemId = id; renderList(); renderInspector();
+    if (focusRow) $('imageList').querySelector(`[data-id="${id}"]`)?.focus();
+  }
+  function renderInspector(syncFields = true) {
+    const item = selectedItem();
+    $('inspectorEmpty').hidden = !!item; $('inspectorContent').hidden = !item;
+    if (!item) { $('selectedCanvas').width = 1; $('selectedCanvas').height = 1; refreshAnimation(); return; }
+    if (syncFields) {
+      $('spriteName').value = item.name;
+      for (const key of ['offsetX', 'offsetY']) { $(key).value = item[key]; $(key).setCustomValidity(''); }
+      for (const key of ['groupId', 'animationOrder', 'durationFrames']) $(key).value = item[key];
+    }
+    $('groupFps').disabled = !item.groupId;
+    if (syncFields || document.activeElement !== $('groupFps')) $('groupFps').value = item.groupId ? state.groups.get(item.groupId)?.fps ?? 60 : '';
+    $('placementHelp').textContent = (item.extracted ? '重心X・下端Y基準' : '9点配置基準') + ' / 補正は出力px';
+    $('selectedStatus').textContent = item.error || item.source;
+    const index = state.validItems.indexOf(item), sprite = state.plan?.sprites[index];
+    R.renderPreview($('selectedCanvas'), $('atlasCanvas'), sprite, state.settings);
+    refreshAnimation();
+  }
+  function cancelPlayback() { if (playback.raf !== null) cancelAnimationFrame(playback.raf); playback.raf = null; }
+  function drawAnimationFrame(elapsedMs) {
+    const frame = C.animationFrameAt(playback.animation, elapsedMs, $('loopAnimation').checked);
+    if (!frame) return;
+    if (frame.index !== playback.frameIndex) {
+      playback.frameIndex = frame.index;
+      const sprite = state.plan.sprites[frame.sprite];
+      R.renderPreview($('animationCanvas'), $('atlasCanvas'), sprite, state.settings);
+      $('animationCanvas').dataset.spriteIndex = sprite.index;
+      $('animationFrameInfo').textContent = `フレーム ${frame.index + 1} / ${playback.animation.frames.length} · ${sprite.name} · Order ${sprite.animationOrder} · ${sprite.durationFrames}f`;
+    }
+    if (frame.done) playback.playing = false;
+    $('playAnimation').disabled = playback.playing;
+    $('stopAnimation').disabled = !playback.playing;
+  }
+  function tickAnimation(now) {
+    playback.raf = null;
+    if (!playback.playing || !playback.animation || !state.plan) return;
+    drawAnimationFrame(Math.max(0, now - playback.start));
+    if (playback.playing) playback.raf = requestAnimationFrame(tickAnimation);
+  }
+  function refreshAnimation() {
+    cancelPlayback();
+    const groupId = selectedItem()?.groupId || '';
+    if (groupId !== playback.groupId) playback.playing = false;
+    playback.groupId = groupId; playback.frameIndex = -1;
+    playback.animation = state.plan && groupId ? C.buildAnimations(state.plan.sprites, state.groups)[groupId] : null;
+    $('animationInfo').textContent = playback.animation ? `Group: ${groupId} · ${playback.animation.fps} FPS` : '有効なSpriteをGroupに設定するとプレビューできます。';
+    $('playAnimation').disabled = !playback.animation;
+    $('stopAnimation').disabled = !playback.playing;
+    if (!playback.animation) {
+      playback.playing = false; $('stopAnimation').disabled = true;
+      R.renderPreview($('animationCanvas'), $('atlasCanvas'), null, state.settings);
+      delete $('animationCanvas').dataset.spriteIndex; $('animationFrameInfo').textContent = ''; return;
+    }
+    playback.start = performance.now(); drawAnimationFrame(0);
+    if (playback.playing) playback.raf = requestAnimationFrame(tickAnimation);
   }
   function disposeItem(item) {
     if (item.url) URL.revokeObjectURL(item.url);
@@ -205,7 +260,7 @@
         if (state.items.length >= C.LIMITS.maxImages) { skipped++; continue; }
         const source = file.name || `clipboard_${state.nextId}.png`;
         const item = { id: state.nextId++, source, name: C.uniqueName(source.replace(/\.[^.]+$/, ''), new Set(state.items.map(i => i.name))),
-          width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null, offsetX: 0, offsetY: 0 };
+          width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null, offsetX: 0, offsetY: 0, ...C.ANIMATION_DEFAULTS };
         state.items.push(item); message(`画像を読み込み中… ${++added} / ${files.length}`);
         await decodeItem(file, item);
         // 大量読込でも定期的に画面と入力処理に制御を返す。
@@ -245,7 +300,7 @@
         ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
         const name = C.uniqueName(`${file.name.replace(/\.[^.]+$/, '')}_${String(index + 1).padStart(2, '0')}`, used); used.add(name);
         const item = { id: state.nextId++, source: file.name, name, width, height, image: await createImageBitmap(scratch),
-          analysis: C.analyzeAlpha(pixels, width, height), extracted: true, offsetX: 0, offsetY: 0, error: '', url: null };
+          analysis: C.analyzeAlpha(pixels, width, height), extracted: true, offsetX: 0, offsetY: 0, error: '', url: null, ...C.ANIMATION_DEFAULTS };
         state.totalPixels += width * height; added.push(item);
         const ratio = Math.min(60 / width, 60 / height, 1);
         scratch.width = Math.max(1, Math.round(width * ratio)); scratch.height = Math.max(1, Math.round(height * ratio));
@@ -270,8 +325,8 @@
     $('downloadDescription').textContent = `${base}.png と ${base}.json をそれぞれ保存してください。`;
     $('confirmDownloads').disabled = true; $('downloadPanel').hidden = false;
   }
-  function jsonBlob(plan, settings, base) {
-    try { return new Blob([JSON.stringify(C.metadata(plan, settings, `${base}.png`), null, 2) + '\n'], { type: 'application/json' }); }
+  function jsonBlob(plan, settings, base, groups) {
+    try { return new Blob([JSON.stringify(C.metadata(plan, settings, `${base}.png`, groups), null, 2) + '\n'], { type: 'application/json' }); }
     catch (error) { throw new Error(`JSON生成に失敗しました: ${error.message}`); }
   }
   async function exportAtlas() {
@@ -279,11 +334,12 @@
     rebuild(); if (!state.plan) { message('有効な画像と設定を確認してください。', 'error'); return; }
     state.saving = true; updateButtons();
     const settings = { ...state.settings }, plan = state.plan;
+    const groups = new Map(Array.from(state.groups, ([id, group]) => [id, { ...group }]));
     try {
       // toBlobは呼び出し時点のCanvasをスナップショットする。
       const png = await R.pngBlob($('atlasCanvas'));
       const date = C.localDate(), number = currentSequence(date);
-      const base = C.basename(date, number), json = jsonBlob(plan, settings, base);
+      const base = C.basename(date, number), json = jsonBlob(plan, settings, base, groups);
       prepareDownloads(png, json, date, number, base); message('PNGとJSONを用意しました。下の2つの保存リンクをご利用ください。');
     } catch (error) {
       message(`書き出しに失敗しました: ${error.message}\n連番は更新していません。設定を確認して再試行してください。`, 'error');
@@ -311,33 +367,55 @@
     const files = Array.from(event.clipboardData?.items || []).filter(i => i.kind === 'file' && i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
     if (files.length) { event.preventDefault(); enqueueFiles(files); }
   });
-  $('imageList').addEventListener('change', event => {
-    if (event.target.dataset.action !== 'rename') return;
-    const item = state.items.find(i => i.id === Number(event.target.closest('.image-row').dataset.id));
-    item.name = C.uniqueName(event.target.value, new Set(state.items.filter(i => i !== item).map(i => i.name)));
-    rebuild();
+  $('spriteForm').addEventListener('submit', event => event.preventDefault());
+  $('groupId').addEventListener('change', event => { event.target.value = selectedItem()?.groupId || ''; });
+  $('playAnimation').addEventListener('click', () => { if (!playback.animation) return; playback.playing = true; refreshAnimation(); });
+  $('stopAnimation').addEventListener('click', () => { playback.playing = false; refreshAnimation(); });
+  $('loopAnimation').addEventListener('change', refreshAnimation);
+  $('spriteName').addEventListener('change', event => {
+    const item = selectedItem(); if (!item) return;
+    item.name = C.uniqueName(event.target.value, new Set(state.items.filter(i => i !== item).map(i => i.name))); rebuild();
   });
-  $('imageList').addEventListener('input', event => {
-    const key = event.target.dataset.action;
-    if (!['offsetX', 'offsetY'].includes(key)) return;
+  $('spriteForm').addEventListener('input', event => {
+    const key = event.target.dataset.action, item = selectedItem();
+    const id = event.target.id;
+    if (item && ['groupId', 'animationOrder', 'durationFrames', 'groupFps'].includes(id)) {
+      if (id === 'groupId') {
+        item.groupId = event.target.value.trim();
+        if (item.groupId && !state.groups.has(item.groupId)) state.groups.set(item.groupId, { id: item.groupId, fps: 60 });
+      } else if (id === 'groupFps') {
+        if (item.groupId) state.groups.set(item.groupId, { id: item.groupId, fps: event.target.valueAsNumber });
+      } else item[id] = event.target.valueAsNumber;
+      rebuild(false); renderList(); return;
+    }
+    if (!item || !['offsetX', 'offsetY'].includes(key)) return;
     const value = event.target.valueAsNumber;
     event.target.setCustomValidity(Number.isSafeInteger(value) ? '' : '整数pxを入力してください。');
-    const item = state.items.find(i => i.id === Number(event.target.closest('.image-row').dataset.id));
     item[key] = value; rebuild(false);
   });
+  $('spriteForm').addEventListener('click', event => {
+    const button = event.target.closest('button'), item = selectedItem(); if (!button || !item) return;
+    const key = button.dataset.action; if (!['offsetX', 'offsetY'].includes(key)) return;
+    const value = (Number.isSafeInteger(item[key]) ? item[key] : 0) + Number(button.dataset.delta);
+    if (Number.isSafeInteger(value)) item[key] = value; rebuild(); button.focus();
+  });
+  $('imageList').addEventListener('keydown', event => {
+    if (event.target.matches('.image-row') && ['Enter', ' '].includes(event.key)) { event.preventDefault(); selectItem(Number(event.target.dataset.id)); }
+  });
   $('imageList').addEventListener('click', event => {
-    const button = event.target.closest('button'); if (!button || state.busy || state.saving) return;
+    const button = event.target.closest('button');
+    if (!button) { const row = event.target.closest('.image-row'); if (row) selectItem(Number(row.dataset.id)); return; }
+    if (state.busy || state.saving) return;
     const position = state.items.findIndex(i => i.id === Number(button.closest('.image-row').dataset.id));
     if (position < 0) return;
     const action = button.dataset.action, item = state.items[position];
-    if (['offsetX', 'offsetY'].includes(action)) { const value = (Number.isSafeInteger(item[action]) ? item[action] : 0) + Number(button.dataset.delta); if (Number.isSafeInteger(value)) item[action] = value; }
-    else if (action === 'delete') { disposeItem(item); state.items.splice(position, 1); }
+    if (action === 'delete') { disposeItem(item); state.items.splice(position, 1); }
     else { const next = position + (action === 'up' ? -1 : 1); if (next < 0 || next >= state.items.length) return;
       [state.items[position], state.items[next]] = [state.items[next], state.items[position]]; }
     rebuild();
     if (action !== 'delete') $('imageList').querySelector(`[data-id="${item.id}"] button[data-action="${action}"]`)?.focus();
   });
-  $('clearImages').addEventListener('click', () => { state.items.forEach(disposeItem); state.items = []; rebuild(); message('入力画像をすべて削除しました。'); });
+  $('clearImages').addEventListener('click', () => { state.items.forEach(disposeItem); state.items = []; state.groups.clear(); rebuild(); message('入力画像をすべて削除しました。'); });
   $('zoom').addEventListener('change', resizePreview); $('showGrid').addEventListener('change', resizePreview);
   new ResizeObserver(resizePreview).observe($('previewViewport'));
   $('exportButton').addEventListener('click', exportAtlas);
@@ -350,7 +428,7 @@
   });
   $('cancelDownloads').addEventListener('click', () => { clearPending(); message('書き出しデータを閉じました。連番は進めていません。保存済みの場合は次回の同名ファイルにご注意ください。', 'warning'); });
   window.addEventListener('beforeunload', event => { if (state.pending || state.saving || state.busy) { event.preventDefault(); event.returnValue = ''; } });
-  window.addEventListener('pagehide', event => { if (!event.persisted) { state.items.forEach(disposeItem); clearPending(); } });
+  window.addEventListener('pagehide', event => { cancelPlayback(); playback.playing = false; if (!event.persisted) { state.items.forEach(disposeItem); clearPending(); } });
   window.addEventListener('focus', updateFilename); window.addEventListener('storage', updateFilename);
   state.settings = C.restoreSettings(readStorage(SETTINGS_KEY)); state.sequence = readStorage(SEQUENCE_KEY);
   populateSettings(); rebuild();

@@ -60,6 +60,21 @@
       for (let y=0;y<32;y++) for(let x=0;x<32;x++) T.equal(data[(y*32+x)*4+3], x>=d.x && x<d.x+d.width && y>=d.y && y<d.y+d.height ? 255 : 0);
     }
   });
+  await test('選択/Animation Previewはoffset・重心・補間を含めAtlasセルと全画素一致', () => {
+    for (const smoothing of ['smooth', 'pixel']) {
+      const sources = [makeSource('red',0,0,4,6), makeSource('blue',1,2,7,9)];
+      sources[0].anchor = { centroidX:1.5, bottomY:5 };
+      sources.forEach((i,index) => Object.assign(i,{offsetX: index ? -2 : 3, offsetY:-1, groupId:'walk',animationOrder:1-index,durationFrames:index ? 6 : 3}));
+      const s={...settings,smoothing}, p=C.makePlan(sources,s), atlas=document.createElement('canvas'), preview=document.createElement('canvas');
+      R.render(atlas,sources,p,s); const json=C.metadata(p,s,'a.png');
+      for(const frame of json.animations.walk.frames) {
+        const sprite=json.sprites[frame.sprite]; R.renderPreview(preview,atlas,sprite,s);
+        T.equal([preview.width,preview.height],[sprite.width,sprite.height]);
+        T.equal(Array.from(preview.getContext('2d').getImageData(0,0,preview.width,preview.height).data), Array.from(atlas.getContext('2d').getImageData(sprite.x,sprite.y,sprite.width,sprite.height).data));
+      }
+      R.renderPreview(preview,atlas,null,s); T.equal(Array.from(preview.getContext('2d').getImageData(0,0,1,1).data),[0,0,0,0]);
+    }
+  });
   for (const r of results) { const li = document.createElement('li'); li.textContent = `${r.ok ? 'PASS' : 'FAIL'} — ${r.name}${r.error ? ': ' + r.error : ''}`; li.style.color = r.ok ? '#17694f' : '#b32424'; document.getElementById('testResults').append(li); }
   const passed = results.filter(r => r.ok).length;
   document.getElementById('testSummary').textContent = `${passed} / ${results.length} 成功`;

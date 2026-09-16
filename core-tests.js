@@ -57,6 +57,78 @@
     equal(C.basename('20260916', 0), '20260916_0000'); equal(C.basename('20260916', 10000), '20260916_10000');
   });
   test('ローカル日付を使用', () => equal(C.localDate(new Date(2026, 8, 16, 0, 0)), '20260916'));
+  function pixels(w, h, points) { const data = new Uint8ClampedArray(w * h * 4); for (const [x, y, a = 255] of points) data[(y * w + x) * 4 + 3] = a; return data; }
+  test('3島を検出して左から右', () => {
+    const d = C.detectIslands(pixels(10, 5, [[8, 0], [1, 4], [5, 2]]), 10, 5, 1, 1);
+    equal(d.islands.map(i => i.bounds.x), [1, 5, 8]);
+  });
+  test('8近傍・重心X・下端Y・画素数・bbox', () => {
+    const d = C.detectIslands(pixels(6, 5, [[1, 1], [2, 2], [3, 3], [2, 3]]), 6, 5, 1, 1);
+    equal(d.islands.length, 1); const i = d.islands[0];
+    equal(i.bounds, { x: 1, y: 1, width: 3, height: 3 }); equal(i.pixelCount, 4); equal(i.centroidX, 2); equal(i.bottomY, 3);
+  });
+  test('透明0件・厳密alpha境界・ゴミ島除外', () => {
+    equal(C.detectIslands(pixels(5, 3, []), 5, 3, 1).islands.length, 0);
+    const data = pixels(5, 3, [[0, 0, 2], [1, 0, 2], [4, 2, 2], [2, 0, 1]]);
+    equal(C.detectIslands(data, 5, 3, 1, 2).islands.map(i => i.pixelCount), [2]);
+    equal(C.detectIslands(data, 5, 3, 255, 1).islands.length, 0);
+  });
+  test('8島は許可・9島は拒否・除外後に上限判定', () => {
+    const points = Array.from({ length: 9 }, (_, i) => [i * 2, 0]);
+    throws(() => C.detectIslands(pixels(19, 1, points), 19, 1, 1, 1));
+    equal(C.detectIslands(pixels(19, 1, points), 19, 1, 1, 2).islands.length, 0);
+    equal(C.detectIslands(pixels(19, 1, points.slice(0,8)), 19, 1, 1, 1).islands.length, 8);
+  });
+  test('重なるbboxの島を独立抽出', () => {
+    const points = [[0,0],[1,0],[2,0],[3,0],[4,0],[0,1],[0,2],[0,3],[0,4],[1,4],[2,4],[3,4],[4,4],[3,2]];
+    const data = pixels(5, 5, points), d = C.detectIslands(data, 5, 5, 1, 1);
+    equal(d.islands.length, 2); equal(C.cropIsland(data, 5, d, d.islands[0])[(2 * 5 + 3) * 4 + 3], 0);
+  });
+  test('重心中心・下端配置と両倍率モード', () => {
+    for (const scaleMode of ['individual', 'uniform']) {
+      const i = item(6, 8); i.anchor = { centroidX: 1, bottomY: 7 }; i.trim = C.addMargin(i.bounds, 2);
+      const s = settings({ scaleMode }), p = C.makePlan([i], s).sprites[0];
+      near(p.draw.x + (1.5 - i.trim.x) * p.scale, 64);
+      near(p.draw.y + (8 - i.trim.y) * p.scale, 120);
+      if (p.draw.x < s.padding - 1e-8 || p.draw.x + p.draw.width > 120 + 1e-8) throw new Error('横幅超過');
+    }
+  });
+  test('offset出力px加算・JSON反映・通常配置回帰', () => {
+    const s = settings(), i = item(10, 20), before = C.makePlan([i], s).sprites[0];
+    equal(before.draw, C.align(56, 112, s)); i.offsetX = -3; i.offsetY = 2;
+    const after = C.metadata(C.makePlan([i], s), s, 'test.png').sprites[0];
+    near(after.draw.x, before.draw.x - 3); near(after.contentDraw.y, before.contentDraw.y + 2);
+    equal([after.offsetX, after.offsetY], [-3, 2]); i.offsetX = NaN; throws(() => C.makePlan([i], s));
+  });
+  test('しきい値変更後anchor・最小画素設定保存', () => {
+    const a = C.analyzeAlpha(pixels(5, 3, [[0,0,2],[4,2,255]]), 5, 3);
+    equal(C.alphaAnchor(a, 1), { centroidX: 2, bottomY: 2, pixelCount: 2 });
+    equal(C.alphaAnchor(a, 2), { centroidX: 4, bottomY: 2, pixelCount: 1 }); equal(C.alphaAnchor(a, 255), null);
+    equal(C.restoreSettings({ minIslandPixels: 2 }).minIslandPixels, 2); equal(C.restoreSettings({ minIslandPixels: 0 }).minIslandPixels, 100);
+  });
+  test('6キャラと多数の低alphaノイズ：100画素除外後に6件', () => {
+    const points = [];
+    for (let i = 0; i < 6; i++) for (let y = 4; y < 14; y++) for (let x = i * 12; x < i * 12 + 10; x++) points.push([x, y]);
+    // 走査順でキャラより先に9個以上のノイズを置く。
+    for (let x = 0; x < 72; x += 2) points.push([x, 0, 2]);
+    const data = pixels(72, 14, points), d = C.detectIslands(data, 72, 14, 1);
+    equal(d.rawCount, 42); equal(d.discardedCount, 36); equal(d.islands.length, 6);
+    equal(d.islands.map(i => i.pixelCount), [100,100,100,100,100,100]);
+    equal(C.detectIslands(data, 72, 14, 1, 101).islands.length, 0);
+    throws(() => C.detectIslands(data, 72, 14, 1, 1));
+  });
+  test('通常・分割共通のoffset初期値と加算：両倍率モード・9点配置', () => {
+    for (const extracted of [false, true]) for (const scaleMode of ['individual', 'uniform']) for (const alignment of C.ALIGNMENTS) {
+      const i = item(10, 20), s = settings({ scaleMode, alignment });
+      if (extracted) i.anchor = { centroidX: 3, bottomY: 19 };
+      const before = C.makePlan([i], s).sprites[0]; equal([before.offsetX, before.offsetY], [0, 0]);
+      i.offsetX = 3; i.offsetY = -2;
+      const after = C.metadata(C.makePlan([i], s), s, 'test.png').sprites[0];
+      near(after.draw.x, before.draw.x + 3); near(after.draw.y, before.draw.y - 2);
+      near(after.contentDraw.x, before.contentDraw.x + 3); near(after.contentDraw.y, before.contentDraw.y - 2);
+      equal(after.scale, before.scale); equal([after.offsetX, after.offsetY], [3, -2]);
+    }
+  });
   function run() { return tests.map(t => { try { t.run(); return { name: t.name, ok: true }; } catch (e) { return { name: t.name, ok: false, error: e.message }; } }); }
   if (typeof module !== 'undefined' && module.exports) {
     const results = run(); results.forEach(r => console.log(`${r.ok ? 'PASS' : 'FAIL'} ${r.name}${r.error ? ': ' + r.error : ''}`));

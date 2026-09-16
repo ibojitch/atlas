@@ -5,7 +5,8 @@
   const $ = id => document.getElementById(id);
   const form = $('settingsForm');
   const SETTINGS_KEY = 'sprite-atlas.settings.v1', SEQUENCE_KEY = 'sprite-atlas.sequence.v1';
-  /** @typedef {{id:number,source:string,name:string,width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null}} SourceItem */
+  // imageは描画用ソース。将来のレイヤー合成もこの境界で用意し、配置計算には持ち込まない。
+  /** @typedef {{id:number,source:string,name:string,width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null,offsetX:number,offsetY:number,extracted?:boolean,anchor?:object|null}} SourceItem */
   const state = { settings: { ...C.DEFAULTS }, items: [], nextId: 1, busy: false, saving: false,
     plan: null, validItems: [], pending: null, totalPixels: 0, sequence: null,
     timer: null, queue: Promise.resolve(), storageWarning: false };
@@ -47,6 +48,7 @@
     $('exportButton').disabled = !state.plan || state.busy || state.saving || !!state.pending;
     $('clearImages').disabled = !state.items.length || state.busy || state.saving;
     $('pickFiles').disabled = state.saving;
+    $('splitFiles').disabled = state.saving || state.busy;
     $('exportButton').textContent = state.saving ? '書き出し中…' : 'PNG + JSON を用意';
   }
   function currentSequence(date) {
@@ -65,7 +67,7 @@
     state.sequence = { date, last }; writeStorage(SEQUENCE_KEY, state.sequence); updateFilename();
   }
 
-  function rebuild() {
+  function rebuild(refreshList = true) {
     clearTimeout(state.timer);
     state.plan = null;
     $('scaleHelp').textContent = state.settings.scaleMode === 'uniform'
@@ -77,6 +79,7 @@
       for (const item of state.items) {
         if (!item.analysis) continue;
         item.bounds = C.alphaBounds(item.analysis, state.settings.threshold);
+        if (item.extracted) item.anchor = C.alphaAnchor(item.analysis, state.settings.threshold);
         item.trim = item.bounds ? C.addMargin(item.bounds, state.settings.margin) : null;
         item.error = item.bounds ? '' : (C.alphaBounds(item.analysis, 0) ? 'しきい値を超える画素がありません。しきい値を下げてください。' : '完全透明画像です。有効な画素がありません。');
         if (item.trim) state.validItems.push(item);
@@ -98,7 +101,7 @@
       $('atlasCanvas').width = 1; $('atlasCanvas').height = 1;
       $('previewStats').textContent = errors.length ? '設定または画像を確認してください。' : '画像を追加すると、ここに出力サイズが表示されます。';
     }
-    renderList(); resizePreview(); updateButtons(); updateFilename();
+    if (refreshList) renderList(); resizePreview(); updateButtons(); updateFilename();
   }
   function resizePreview() {
     if (!state.plan) return;
@@ -130,6 +133,18 @@
       const detail = element('div', 'image-detail'), input = element('input');
       input.value = item.name; input.maxLength = 200; input.dataset.action = 'rename'; input.setAttribute('aria-label', `${item.source} のスプライト名`);
       detail.append(input);
+      const offsets = element('div', 'offset-controls');
+      for (const axis of ['X', 'Y']) {
+        const label = element('label', '', `offset${axis} `), field = element('input');
+        field.type = 'number'; field.step = '1'; field.value = item[`offset${axis}`]; field.dataset.action = `offset${axis}`;
+        field.setAttribute('aria-label', `${item.name} offset${axis}（px）`); label.append(field); offsets.append(label);
+        for (const delta of [-1, 1]) {
+          const button = element('button', '', delta < 0 ? '−1' : '+1'); button.type = 'button';
+          button.dataset.action = `offset${axis}`; button.dataset.delta = delta;
+          button.setAttribute('aria-label', `${item.name} ${axis} ${delta > 0 ? '+' : ''}${delta}px`); offsets.append(button);
+        }
+      }
+      detail.append(element('div', 'hint', item.extracted ? '重心X・下端Y基準 / 補正は出力px' : '9点配置基準 / 補正は出力px')); detail.append(offsets);
       const source = element('div', 'source-name', item.source); source.title = item.source; detail.append(source);
       detail.append(element('div', 'dimensions', item.width ? `${item.width} × ${item.height} → ${item.trim ? `${item.trim.width} × ${item.trim.height} px` : '—'}` : 'サイズ未取得'));
       let status = item.error;
@@ -190,7 +205,7 @@
         if (state.items.length >= C.LIMITS.maxImages) { skipped++; continue; }
         const source = file.name || `clipboard_${state.nextId}.png`;
         const item = { id: state.nextId++, source, name: C.uniqueName(source.replace(/\.[^.]+$/, ''), new Set(state.items.map(i => i.name))),
-          width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null };
+          width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null, offsetX: 0, offsetY: 0 };
         state.items.push(item); message(`画像を読み込み中… ${++added} / ${files.length}`);
         await decodeItem(file, item);
         // 大量読込でも定期的に画面と入力処理に制御を返す。
@@ -204,6 +219,42 @@
     if (state.saving) { message('保存処理の完了後に画像を追加してください。', 'warning'); return; }
     const files = Array.from(fileList);
     state.queue = state.queue.then(() => importFiles(files)).catch(error => { state.busy = false; message(`画像読み込み中に問題が発生しました: ${error.message}`, 'error'); updateButtons(); });
+  }
+  async function importSplit(file, settings) {
+    const original = { source: file.name, image: null, url: null }, added = [];
+    let scratch;
+    state.busy = true; updateButtons();
+    try {
+      const errors = C.validateSettings(settings); if (errors.length) throw new Error(errors.join(' '));
+      const signature = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+      if (signature.join(',') !== '137,80,78,71,13,10,26,10') throw new Error('透過PNGを選択してください。');
+      await decodeItem(file, original); if (!original.image) throw new Error(original.error);
+      if (original.analysis.opaque) throw new Error('透明部分のあるPNGを選択してください。');
+      scratch = document.createElement('canvas'); scratch.width = original.width; scratch.height = original.height;
+      const ctx = scratch.getContext('2d'); ctx.drawImage(original.image, 0, 0);
+      const data = ctx.getImageData(0, 0, original.width, original.height).data;
+      const detection = C.detectIslands(data, original.width, original.height, settings.threshold, settings.minIslandPixels);
+      if (state.items.length + detection.islands.length > C.LIMITS.maxImages) throw new Error('画像の上限500枚を超えるため追加できません。');
+      const cropPixels = detection.islands.reduce((sum, i) => sum + i.bounds.width * i.bounds.height, 0);
+      if (state.totalPixels - original.width * original.height + cropPixels > C.LIMITS.maxTotalSourcePixels) throw new Error('抽出後の合計が96M画素を超えます。');
+      const used = new Set(state.items.map(i => i.name));
+      for (const [index, island] of detection.islands.entries()) {
+        const { width, height } = island.bounds;
+        const pixels = C.cropIsland(data, original.width, detection, island);
+        scratch.width = width; scratch.height = height;
+        ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
+        const name = C.uniqueName(`${file.name.replace(/\.[^.]+$/, '')}_${String(index + 1).padStart(2, '0')}`, used); used.add(name);
+        const item = { id: state.nextId++, source: file.name, name, width, height, image: await createImageBitmap(scratch),
+          analysis: C.analyzeAlpha(pixels, width, height), extracted: true, offsetX: 0, offsetY: 0, error: '', url: null };
+        state.totalPixels += width * height; added.push(item);
+        const ratio = Math.min(60 / width, 60 / height, 1);
+        scratch.width = Math.max(1, Math.round(width * ratio)); scratch.height = Math.max(1, Math.round(height * ratio));
+        ctx.drawImage(item.image, 0, 0, scratch.width, scratch.height); item.thumb = scratch.toDataURL('image/png');
+      }
+      state.items.push(...added);
+      message(`${file.name}: ${added.length}キャラクターを検出・追加しました（ノイズ${detection.discardedCount}島を除外、最小${settings.minIslandPixels}画素）。${added.length ? '' : 'しきい値や島の最小画素数を確認してください。'}`, added.length ? 'info' : 'warning');
+    } catch (error) { added.forEach(disposeItem); message(`分割追加できません：${error.message}`, 'error'); }
+    finally { disposeItem(original); if (scratch) { scratch.width = 1; scratch.height = 1; } state.busy = false; rebuild(); }
   }
   function clearPending() {
     if (state.pending) { URL.revokeObjectURL(state.pending.pngUrl); URL.revokeObjectURL(state.pending.jsonUrl); }
@@ -245,6 +296,12 @@
   $('bottomAlign').addEventListener('click', () => { form.elements.alignment.value = 'bottom-center'; settingsChanged(); });
   $('pickFiles').addEventListener('click', () => $('fileInput').click());
   $('fileInput').addEventListener('change', event => { enqueueFiles(event.target.files); event.target.value = ''; });
+  $('splitFiles').addEventListener('click', () => $('splitInput').click());
+  $('splitInput').addEventListener('change', event => {
+    const file = event.target.files[0]; event.target.value = ''; if (!file || state.saving) return;
+    const settings = { ...state.settings };
+    state.queue = state.queue.then(() => importSplit(file, settings));
+  });
   let dragDepth = 0;
   window.addEventListener('dragenter', event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dragDepth++; $('dropZone').classList.add('dragging'); } });
   window.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
@@ -260,12 +317,21 @@
     item.name = C.uniqueName(event.target.value, new Set(state.items.filter(i => i !== item).map(i => i.name)));
     rebuild();
   });
+  $('imageList').addEventListener('input', event => {
+    const key = event.target.dataset.action;
+    if (!['offsetX', 'offsetY'].includes(key)) return;
+    const value = event.target.valueAsNumber;
+    event.target.setCustomValidity(Number.isSafeInteger(value) ? '' : '整数pxを入力してください。');
+    const item = state.items.find(i => i.id === Number(event.target.closest('.image-row').dataset.id));
+    item[key] = value; rebuild(false);
+  });
   $('imageList').addEventListener('click', event => {
     const button = event.target.closest('button'); if (!button || state.busy || state.saving) return;
     const position = state.items.findIndex(i => i.id === Number(button.closest('.image-row').dataset.id));
     if (position < 0) return;
     const action = button.dataset.action, item = state.items[position];
-    if (action === 'delete') { disposeItem(item); state.items.splice(position, 1); }
+    if (['offsetX', 'offsetY'].includes(action)) { const value = (Number.isSafeInteger(item[action]) ? item[action] : 0) + Number(button.dataset.delta); if (Number.isSafeInteger(value)) item[action] = value; }
+    else if (action === 'delete') { disposeItem(item); state.items.splice(position, 1); }
     else { const next = position + (action === 'up' ? -1 : 1); if (next < 0 || next >= state.items.length) return;
       [state.items[position], state.items[next]] = [state.items[next], state.items[position]]; }
     rebuild();

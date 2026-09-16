@@ -47,6 +47,19 @@
   await test('PNG生成失敗はPromiseのエラーとして処理', async () => {
     let rejected = false; try { await R.pngBlob({ toBlob: cb => cb(null) }); } catch { rejected = true; } T.equal(rejected, true);
   });
+  for (const extracted of [false, true]) await test(`${extracted ? '抽出' : '通常'}スプライトのoffset変更がPNG全画素とJSONへ一致`, async () => {
+    const source = makeSource('red', 0, 0, 4, 6);
+    if (extracted) source.anchor = { centroidX: 1.5, bottomY: 5 };
+    source.trim = C.addMargin(source.bounds, 2);
+    for (const [offsetX, offsetY] of [[0,0],[-3,-2],[2,1]]) {
+      Object.assign(source, { offsetX, offsetY });
+      const s = { ...settings, columns: 1, pot: false }, p = C.makePlan([source], s), c = document.createElement('canvas');
+      R.render(c, [source], p, s); const bitmap = await createImageBitmap(await R.pngBlob(c));
+      const ctx = c.getContext('2d'); ctx.clearRect(0,0,32,32); ctx.drawImage(bitmap,0,0); bitmap.close();
+      const data = ctx.getImageData(0,0,32,32).data, d = C.metadata(p,s,'test.png').sprites[0].contentDraw;
+      for (let y=0;y<32;y++) for(let x=0;x<32;x++) T.equal(data[(y*32+x)*4+3], x>=d.x && x<d.x+d.width && y>=d.y && y<d.y+d.height ? 255 : 0);
+    }
+  });
   for (const r of results) { const li = document.createElement('li'); li.textContent = `${r.ok ? 'PASS' : 'FAIL'} — ${r.name}${r.error ? ': ' + r.error : ''}`; li.style.color = r.ok ? '#17694f' : '#b32424'; document.getElementById('testResults').append(li); }
   const passed = results.filter(r => r.ok).length;
   document.getElementById('testSummary').textContent = `${passed} / ${results.length} 成功`;

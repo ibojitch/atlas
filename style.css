@@ -572,3 +572,8 @@ footer a{
     gap:8px
   }
 }
+/* 全スプライト共通の補正。狭い画面では自然に折り返す。 */
+.offset-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 6px; }
+.offset-controls label { display: flex; align-items: center; gap: 4px; }
+.offset-controls input { width: 70px; }
+.offset-controls button { padding: 4px 7px; }

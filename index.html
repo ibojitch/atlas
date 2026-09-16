@@ -34,6 +34,8 @@
             <label>追加余白 <span>px</span><input name="margin" type="number" min="0" max="8192" step="1" value="0" required></label>
           </div>
           <p class="hint">alpha &gt; しきい値を有効画素とします。追加余白はトリムの外側に作る透明な余白です。</p>
+          <label>分割追加：島の最小画素数<input name="minIslandPixels" type="number" min="1" step="1" value="100" required></label>
+          <p class="hint">初期値100画素。これ未満の島を除外してから最大8個を判定します。小さいドット絵では値を下げてください。</p>
         </fieldset>
         <fieldset><legend>03 / サイズと配置</legend>
           <label>スケーリング方式<select name="scaleMode"><option value="individual">Individual Fit — 個別にフィット</option><option value="uniform">Uniform Scale — 全画像を同じ倍率に</option></select></label>
@@ -55,6 +57,9 @@
           <input id="fileInput" type="file" accept="image/*" multiple hidden>
         </div>
         <p class="hint">PNG / WebP推奨。画像一覧の順番で、左上から配置します。</p>
+        <button id="splitFiles" type="button">複数キャラPNGを分割して追加</button>
+        <input id="splitInput" type="file" accept="image/png,.png" hidden>
+        <p class="hint">透過PNG・横1列・最大8島。抽出キャラは重心X／下端Yで配置します。島分けの変更は削除して再追加してください。</p>
       </section>
       <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
       <div id="validation" class="notice error" role="alert" hidden></div>

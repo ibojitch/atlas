@@ -3,7 +3,7 @@
   'use strict';
   const DEFAULTS = Object.freeze({ cellWidth: 128, cellHeight: 128, padding: 8,
     columns: 4, threshold: 1, margin: 0, scaleMode: 'individual',
-    alignment: 'center', smoothing: 'smooth', pot: false, upscale: true });
+    alignment: 'center', smoothing: 'smooth', pot: false, upscale: true, minIslandPixels: 100 });
   const LIMITS = Object.freeze({ maxSide: 8192, maxPixels: 33554432,
     maxSourcePixels: 33554432, maxTotalSourcePixels: 100663296, maxImages: 500 });
   const ALIGNMENTS = ['top-left', 'top-center', 'top-right', 'center-left',
@@ -12,6 +12,7 @@
   /** @param {object} s @returns {string[]} */
   function validateSettings(s) {
     const errors = [];
+    if (!Number.isSafeInteger(s.minIslandPixels) || s.minIslandPixels < 1) errors.push('島の最小画素数は1以上の整数にしてください。');
     for (const [key, label] of [['cellWidth', 'セル幅'], ['cellHeight', 'セル高さ'], ['columns', '列数']]) {
       if (!Number.isSafeInteger(s[key]) || s[key] <= 0) errors.push(`${label}は正の整数にしてください。`);
     }
@@ -49,11 +50,12 @@
   /** 各alpha値の外接矩形だけ保持。しきい値変更時の画素再走査を不要にする。 */
   function analyzeAlpha(data, width, height) {
     if (data.length !== width * height * 4) throw new Error('画素データのサイズが一致しません。');
-    const bins = Array.from({ length: 256 }, () => ({ minX: width, minY: height, maxX: -1, maxY: -1 }));
+    const bins = Array.from({ length: 256 }, () => ({ minX: width, minY: height, maxX: -1, maxY: -1, count: 0, sumX: 0 }));
     let opaque = true;
     for (let y = 0, offset = 3; y < height; y++) {
       for (let x = 0; x < width; x++, offset += 4) {
         const a = data[offset], b = bins[a];
+        b.count++; b.sumX += x;
         if (a !== 255) opaque = false;
         b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
         b.minY = Math.min(b.minY, y); b.maxY = Math.max(b.maxY, y);
@@ -78,12 +80,62 @@
     return { x: bounds.x - margin, y: bounds.y - margin,
       width: bounds.width + margin * 2, height: bounds.height + margin * 2 };
   }
+  function alphaAnchor(analysis, threshold) {
+    let count = 0, sumX = 0, bottomY = -1;
+    for (let a = threshold + 1; a < 256; a++) {
+      const b = analysis.bins[a]; count += b.count; sumX += b.sumX; bottomY = Math.max(bottomY, b.maxY);
+    }
+    return count ? { centroidX: sumX / count, bottomY, pixelCount: count } : null;
+  }
+  /** 8近傍。ラベルを保持し、外接矩形が重なる島も混入せず切り出す。 */
+  function detectIslands(data, width, height, threshold, minPixels = DEFAULTS.minIslandPixels) {
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || width * height > LIMITS.maxSourcePixels || data.length !== width * height * 4) throw new Error('画素データのサイズが不正です。');
+    if (!Number.isInteger(threshold) || threshold < 0 || threshold > 255 || !Number.isSafeInteger(minPixels) || minPixels < 1) throw new Error('抽出設定が不正です。');
+    const labels = new Int32Array(width * height), queue = new Int32Array(width * height), islands = [];
+    let label = 0;
+    for (let start = 0; start < labels.length; start++) {
+      if (labels[start] || data[start * 4 + 3] <= threshold) continue;
+      label++; let head = 0, tail = 1, sumX = 0, minX = width, minY = height, maxX = -1, maxY = -1;
+      queue[0] = start; labels[start] = label;
+      while (head < tail) {
+        const p = queue[head++], x = p % width, y = Math.floor(p / width);
+        sumX += x; minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+        for (let ny = Math.max(0, y - 1); ny <= Math.min(height - 1, y + 1); ny++) {
+          for (let nx = Math.max(0, x - 1); nx <= Math.min(width - 1, x + 1); nx++) {
+            const n = ny * width + nx;
+            if (!labels[n] && data[n * 4 + 3] > threshold) { labels[n] = label; queue[tail++] = n; }
+          }
+        }
+      }
+      if (tail >= minPixels) {
+        islands.push({ label, bounds: { x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1 }, pixelCount: tail, centroidX: sumX / tail, bottomY: maxY });
+      }
+    }
+    // rawの連結成分数(label)ではなく、画素数フィルタを通過した島だけで判定する。
+    if (islands.length > 8) throw new Error(`ノイズ除外後も9個以上（${islands.length}個）の島を検出しました。最大8キャラクターまでです。最小画素数（現在${minPixels}）を調整するか入力画像を分けてください。`);
+    islands.sort((a, b) => a.bounds.x - b.bounds.x || a.centroidX - b.centroidX);
+    return { islands, labels, rawCount: label, discardedCount: label - islands.length };
+  }
+  function cropIsland(data, width, detection, island) {
+    const b = island.bounds, pixels = new Uint8ClampedArray(b.width * b.height * 4);
+    for (let y = 0; y < b.height; y++) for (let x = 0; x < b.width; x++) {
+      const p = (b.y + y) * width + b.x + x;
+      if (detection.labels[p] === island.label) pixels.set(data.subarray(p * 4, p * 4 + 4), (y * b.width + x) * 4);
+    }
+    return pixels;
+  }
+  function itemScale(item, s) {
+    // 重心が偏っていても初期配置が余白内に収まる幅でfitする。
+    const a = item.anchor, t = item.trim;
+    const width = a ? 2 * Math.max(a.centroidX + .5 - t.x, t.x + t.width - a.centroidX - .5) : t.width;
+    return fitScale(width, t.height, s);
+  }
   function fitScale(width, height, s) {
     const scale = Math.min((s.cellWidth - 2 * s.padding) / width, (s.cellHeight - 2 * s.padding) / height);
     return s.upscale ? scale : Math.min(1, scale);
   }
   function uniformScale(items, s) {
-    return items.length ? Math.min(...items.map(item => fitScale(item.trim.width, item.trim.height, s))) : 1;
+    return items.length ? Math.min(...items.map(item => itemScale(item, s))) : 1;
   }
   function align(width, height, s) {
     const horizontal = s.alignment.endsWith('left') ? 0 : s.alignment.endsWith('right') ? 1 : 0.5;
@@ -113,14 +165,22 @@
     const size = layout(items.length, s);
     const sharedScale = uniformScale(items, s);
     const sprites = items.map((item, index) => {
-      const scale = s.scaleMode === 'uniform' ? sharedScale : fitScale(item.trim.width, item.trim.height, s);
+      const scale = s.scaleMode === 'uniform' ? sharedScale : itemScale(item, s);
       const draw = align(item.trim.width * scale, item.trim.height * scale, s);
+      if (item.anchor) {
+        draw.x = s.cellWidth / 2 - (item.anchor.centroidX + .5 - item.trim.x) * scale;
+        draw.y = s.cellHeight - s.padding - (item.anchor.bottomY + 1 - item.trim.y) * scale;
+      }
+      const offsetX = item.offsetX ?? 0, offsetY = item.offsetY ?? 0;
+      if (!Number.isSafeInteger(offsetX) || !Number.isSafeInteger(offsetY)) throw new Error('XY補正は整数pxにしてください。');
+      draw.x += offsetX; draw.y += offsetY;
       const contentDraw = { x: draw.x + (item.bounds.x - item.trim.x) * scale,
         y: draw.y + (item.bounds.y - item.trim.y) * scale,
         width: item.bounds.width * scale, height: item.bounds.height * scale };
       return { index, name: item.name, source: item.source, ...cellPosition(index, s),
         width: s.cellWidth, height: s.cellHeight, sourceWidth: item.width, sourceHeight: item.height,
-        trim: { ...item.trim }, bounds: { ...item.bounds }, draw, contentDraw, scale };
+        trim: { ...item.trim }, bounds: { ...item.bounds }, draw, contentDraw, scale,
+        offsetX, offsetY, ...(item.anchor ? { anchor: { ...item.anchor }, placement: 'centroid-bottom' } : {}) };
     });
     return { ...size, sprites };
   }
@@ -147,7 +207,7 @@
   function basename(date, number) { return `${date}_${String(number).padStart(4, '0')}`; }
   const api = { DEFAULTS, LIMITS, ALIGNMENTS, validateSettings, restoreSettings, analyzeAlpha, alphaBounds,
     addMargin, fitScale, uniformScale, align, nextPowerOfTwo, layout, cellPosition, makePlan, metadata,
-    uniqueName, localDate, nextSequence, basename };
+    uniqueName, localDate, nextSequence, basename, detectIslands, cropIsland, alphaAnchor };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AtlasCore = Object.freeze(api);
 })(typeof globalThis !== 'undefined' ? globalThis : this);

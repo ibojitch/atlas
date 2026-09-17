@@ -82,6 +82,14 @@
     return { x: bounds.x - margin, y: bounds.y - margin,
       width: bounds.width + margin * 2, height: bounds.height + margin * 2 };
   }
+  function itemTrim(bounds, margin, item = {}) {
+    const scaleX = item.sourceScaleX ?? 1, scaleY = item.sourceScaleY ?? 1;
+    if (typeof scaleX !== 'number' || !Number.isFinite(scaleX) || scaleX <= 0 || scaleX > 1 ||
+        typeof scaleY !== 'number' || !Number.isFinite(scaleY) || scaleY <= 0 || scaleY > 1) throw new Error('Project画像の縮小率が不正です。');
+    const marginX = margin * scaleX, marginY = margin * scaleY;
+    return { x: bounds.x - marginX, y: bounds.y - marginY,
+      width: bounds.width + marginX * 2, height: bounds.height + marginY * 2 };
+  }
   function alphaAnchor(analysis, threshold) {
     let count = 0, sumX = 0, bottomY = -1;
     for (let a = threshold + 1; a < 256; a++) {
@@ -283,7 +291,9 @@
   }
   function validateProject(project) {
     if (!project || typeof project !== 'object' || Array.isArray(project)) throw new Error('Project JSONのルートが不正です。');
-    if (project.format !== 'sprite-atlas-project' || project.version !== 1) throw new Error('対応していないProject形式またはversionです。');
+    if (project.format !== 'sprite-atlas-project' || ![1, 2].includes(project.version)) throw new Error('対応していないProject形式またはversionです。');
+    const storageMode = project.version === 1 ? 'standard' : project.storageMode;
+    if (!['standard', 'compact'].includes(storageMode)) throw new Error('Projectの保存モードが不正です。');
     if (!project.settings || typeof project.settings !== 'object') throw new Error('Projectのsettingsが不正です。');
     const settings = {};
     for (const key of Object.keys(DEFAULTS)) {
@@ -305,12 +315,16 @@
       if (!Number.isSafeInteger(sprite.width) || sprite.width < 1 || !Number.isSafeInteger(sprite.height) || sprite.height < 1) throw new Error(`Sprite ${index + 1}の画像寸法が不正です。`);
       if (!Number.isSafeInteger(sprite.offsetX) || !Number.isSafeInteger(sprite.offsetY) || typeof sprite.extracted !== 'boolean') throw new Error(`Sprite ${index + 1}の配置属性が不正です。`);
       const tags = normalizeTags(sprite.tags), animation = animationProperties(sprite);
+      const sourceScaleX = project.version === 1 ? 1 : sprite.sourceScaleX;
+      const sourceScaleY = project.version === 1 ? 1 : sprite.sourceScaleY;
+      if (typeof sourceScaleX !== 'number' || !Number.isFinite(sourceScaleX) || sourceScaleX <= 0 || sourceScaleX > 1 ||
+          typeof sourceScaleY !== 'number' || !Number.isFinite(sourceScaleY) || sourceScaleY <= 0 || sourceScaleY > 1) throw new Error(`Sprite ${index + 1}の縮小率が不正です。`);
       return { name: sprite.name, source: sprite.source, image: sprite.image, width: sprite.width, height: sprite.height,
-        tags, offsetX: sprite.offsetX, offsetY: sprite.offsetY, extracted: sprite.extracted, ...animation };
+        tags, offsetX: sprite.offsetX, offsetY: sprite.offsetY, extracted: sprite.extracted, sourceScaleX, sourceScaleY, ...animation };
     });
     const names = new Set(); for (const sprite of sprites) { if (names.has(sprite.name)) throw new Error('Project内のSprite名が重複しています。'); names.add(sprite.name); }
     const animationErrors = validateAnimations(sprites, groups); if (animationErrors.length) throw new Error(animationErrors.join(' '));
-    return { settings, sprites, groups };
+    return { version: project.version, storageMode, settings, sprites, groups };
   }
   function durationMs(durationFrames, fps) {
     validateFps(fps);
@@ -362,7 +376,7 @@
   }
   function basename(date, number) { return `${date}_${String(number).padStart(4, '0')}`; }
   const api = { DEFAULTS, LIMITS, ALIGNMENTS, validateSettings, restoreSettings, analyzeAlpha, alphaBounds,
-    addMargin, fitScale, uniformScale, align, nextPowerOfTwo, layout, cellPosition, makePlan, metadata,
+    addMargin, itemTrim, fitScale, uniformScale, align, nextPowerOfTwo, layout, cellPosition, makePlan, metadata,
     uniqueName, localDate, nextSequence, basename, detectIslands, cropIsland, alphaAnchor,
     normalizeTags, validateGrid, validateAddition, inferGrid, validateProject,
     ANIMATION_DEFAULTS, animationProperties, validateFps, validateAnimations, durationMs, buildAnimations, animationFrameAt };

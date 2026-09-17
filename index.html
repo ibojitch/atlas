@@ -75,9 +75,11 @@
       </section>
       <section class="panel project-panel" aria-label="編集Project">
         <h2>編集Project</h2>
+        <label>保存方式<select id="projectStorageMode"><option value="standard">通常Project — 元解像度・無劣化</option><option value="compact">Compact Project — 現在の用途向けに軽量化</option></select></label>
         <div class="button-row"><button id="prepareProject" type="button" disabled>Projectを用意</button><a id="saveProjectLink" class="button" hidden>Projectを保存</a><button id="loadProject" type="button">ProjectをLOAD</button></div>
         <input id="projectInput" type="file" accept=".json,.satlas.json,application/json" hidden>
-        <p class="hint">画像・順番・Tags・offset・Animation・出力設定を.satlas.jsonに保存します。Runtime用PNG/JSONとは別で、連番を進めません。</p>
+        <p id="projectStatus" class="hint">保存方式を選び、Projectを用意してください。</p>
+        <p class="hint">通常は元画像を維持します。Compactは現在の有効範囲・描画倍率へ縮小するため、後から大幅に拡大しても元の細部は戻りません。Runtime用PNG/JSONとは別で、連番を進めません。</p>
       </section>
       <section class="export-panel" aria-label="書き出し">
         <div class="export-bar"><div><strong id="nextFilename">—</strong><p class="hint">透過PNG + 座標インデックスJSON</p></div><button id="exportButton" class="primary" type="button" disabled>PNG + JSON を用意</button></div>

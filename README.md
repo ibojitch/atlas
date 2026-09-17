@@ -229,21 +229,27 @@ Tagsはカンマ区切りで入力します。前後空白と空要素を除き�
 
 ## 編集Project SAVE / LOAD
 
-編集ProjectはRuntime用PNG + JSONとは別機能です。「Projectを用意」で`.satlas.json`の保存リンクを作り、「ProjectをLOAD」で編集状態を復元します。Project SAVEはRuntime書き出し連番を進めず、Runtimeのpending downloadとも分離されています。
+編集ProjectはRuntime用PNG + JSONとは別機能です。「Projectを用意」で`.satlas.json`の保存リンクを作り、「ProjectをLOAD」で編集状態を復元します。Project SAVEはRuntime書き出し連番を進めず、Runtimeのpending downloadとも分離されています。Projectを用意した後に設定・Sprite・Tags・Animation等を編集すると、古い保存リンクを直ちに破棄します。最新状態を保存するには、もう一度Projectを用意してください。
 
-Project形式はJSONベースで、識別子と独立したversionを持ちます。
+保存方式は次の2種類です。
+
+- **通常Project**：現在メモリ上にある画像を元解像度のPNGで保存します。無劣化ですが、大きな元画像を含むとProjectも大きくなります。
+- **Compact Project**：現在のalpha有効範囲へ切り詰め、現在の描画倍率で必要な解像度までPNGを縮小します。編集中のメモリ上の画像は変更しません。後からCellを大幅に拡大したりalphaしきい値を下げたりしても、破棄された細部・範囲は戻りません。
+
+Project形式はJSONベースで、識別子とRuntime JSONとは独立したversionを持ちます。新規保存はversion 2で、version 1もLOADできます。
 
 ```json
 {
   "format": "sprite-atlas-project",
-  "version": 1,
+  "version": 2,
+  "storageMode": "compact",
   "settings": {},
   "groups": [],
   "sprites": []
 }
 ```
 
-保存対象は出力設定、Sprite順、PNG Data URLとして埋め込んだ各Sprite画像、name、source、Tags、offset、抽出配置方式、Animation属性、Group FPSです。ImageBitmap、Object URL、analysis、bounds、trim、thumbnail、選択状態、再生状態、現在フレーム、zoom、pending download、ファイル連番は保存しません。LOAD時に画像を再デコードし、解析・thumbnail・bounds・trim・anchorを現在のロジックで再生成します。
+保存対象は保存方式、出力設定、Sprite順、PNG Data URLとして埋め込んだ各Sprite画像、Compact時の縮小率、name、source、Tags、offset、抽出配置方式、Animation属性、Group FPSです。ImageBitmap、Object URL、analysis、bounds、trim、thumbnail、選択状態、再生状態、現在フレーム、zoom、pending download、ファイル連番は保存しません。LOAD時に画像を再デコードし、解析・thumbnail・bounds・trim・anchorを現在のロジックで再生成します。Compact画像の縮小率は、トリム追加余白の意味を維持するために使用します。
 
 LOADはatomicです。JSON、format/version、settings、Tags、Animation、Group FPS、画像、Sprite数、画素数を一時領域ですべて検証し、全画像の復号に成功してから現在の編集stateを入れ替えます。途中で失敗した場合は現在のProjectを維持し、一時ImageBitmapも破棄します。
 
@@ -271,7 +277,7 @@ LOADはatomicです。JSON、format/version、settings、Tags、Animation、Grou
 - 色管理やSmooth補間の細部はブラウザに依存します。ICCプロファイル等の元画像メタデータは保持しません。
 - ダウンロード後のディスク書き込み失敗、保存取消、名前変更をアプリから自動検知することはできません。
 - 複数画像の読み込みは順番に実行します。ファイル一覧の並びはブラウザから受け取る順番です。任意の順番へ↑ / ↓で変更できます。
-- 取り消し履歴、セルごとのピボット指定、ZIPコンテナ形式のProjectはありません。Project v1は画像をPNG Data URLとしてJSONへ埋め込むため、画像数・寸法に応じてファイルが大きくなります。
+- 取り消し履歴、セルごとのピボット指定、ZIPコンテナ形式のProjectはありません。通常Projectは画像を元解像度のPNG Data URLとしてJSONへ埋め込むため、画像数・寸法に応じてファイルが大きくなります。Compact Projectは容量を減らせますが、元解像度へは戻せません。
 
 ## コード構成
 
@@ -288,7 +294,7 @@ LOADはatomicです。JSON、format/version、settings、Tags、Animation、Grou
 
 ### Node不要のブラウザテスト
 
-`tests.html`を直接開くと57項目を実行します。PNGを再デコードして全画素の色・透明度をJSONの配置と比較するほか、Grid境界、Tags正規化、Project構造検証も含みます。Node単独の`core-tests.js`は49項目です。
+`tests.html`を直接開くと58項目を実行します。PNGを再デコードして全画素の色・透明度をJSONの配置と比較するほか、Grid境界、Tags正規化、Project v1/v2構造検証も含みます。Node単独の`core-tests.js`は50項目です。
 
 ### 任意の開発用テスト
 
@@ -314,4 +320,4 @@ node browser-smoke.cjs
 
 終了時にはChrome終了を待ち、作成した一時ディレクトリがOSのtemporary directory直下のatlas-smoke-*であることを確認してから削除します。失敗時やSIGINT/SIGTERMも可能な範囲で後始末します。OSによる強制終了では一時フォルダが残る場合があります。ユーザーの通常Chromeプロファイルは変更しません。スクリーンショットを残す場合だけATLAS_SCREENSHOTに保存先ファイルの絶対パスを指定してください（既存ファイルは上書きします）。既定ではダウンロードしたテストPNG/JSONも一時プロファイルと一緒に削除します。
 
-画面操作60項目で既存の読込・保存・反転コピー・連番・Animation・レスポンシブUIに加え、1280×684のGrid分割、Tags、Project SAVE→LOAD→再SAVE、Atlas画素一致、malformed JSON・version・画像・settings・Tags・Animation・件数・画素上限のatomic LOAD失敗を検証します。続けて57項目の計算・Canvas・PNGテストを実行します。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。
+画面操作65項目で既存の読込・保存・反転コピー・連番・Animation・レスポンシブUIに加え、1280×684のGrid分割、Tags、通常Projectの画素一致、LOAD後の追加Sprite、古い保存リンクの無効化、Compactの容量削減・再LOAD、malformed JSON等のatomic LOAD失敗を検証します。続けて58項目の計算・Canvas・PNGテストを実行します。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。

@@ -212,6 +212,17 @@
       const broken=JSON.parse(JSON.stringify(project));mutate(broken);throws(()=>C.validateProject(broken));
     }
   });
+  test('Project v2は通常/Compact・縮小率を検証しv1互換を維持', () => {
+    const sprite={name:'hero',source:'hero.png',tags:[],width:20,height:30,image:'data:image/png;base64,AA==',offsetX:0,offsetY:0,extracted:false,groupId:'',animationOrder:0,durationFrames:1,sourceScaleX:.25,sourceScaleY:.5};
+    for(const storageMode of ['standard','compact']) {
+      const p={format:'sprite-atlas-project',version:2,storageMode,settings:settings(),groups:[],sprites:[sprite]};
+      const v=C.validateProject(p);equal([v.version,v.storageMode,v.sprites[0].sourceScaleX,v.sprites[0].sourceScaleY],[2,storageMode,.25,.5]);
+    }
+    for(const change of [p=>p.storageMode='zip',p=>p.sprites[0].sourceScaleX=0,p=>p.sprites[0].sourceScaleY=1.1]) {
+      const p={format:'sprite-atlas-project',version:2,storageMode:'compact',settings:settings(),groups:[],sprites:[{...sprite}]};change(p);throws(()=>C.validateProject(p));
+    }
+    equal(C.itemTrim({x:2,y:3,width:10,height:20},8,{sourceScaleX:.25,sourceScaleY:.5}),{x:0,y:-1,width:14,height:28});
+  });
   test('経過時間再生の境界・遅延・ループ・非ループ終端', () => {
     const a={fps:60,frames:[{sprite:2,duration:3},{sprite:0,duration:6}]};
     equal(C.animationFrameAt(a,0),{index:0,sprite:2,done:false}); equal(C.animationFrameAt(a,49).sprite,2);

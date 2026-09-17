@@ -528,9 +528,18 @@ footer a{
 .line-image-card p,.line-image-card small{font-size:11px;color:var(--muted)}
 .line-image-placeholder{display:grid;place-items:center;width:72px;height:72px;border:1px dashed #91aaa5;border-radius:6px;background:#edf5f2;color:#668078;font-size:11px;font-weight:700}
 .line-slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:8px;overflow:auto;padding-right:4px}
-.line-slot{min-height:92px;padding:10px;border:1px dashed #aebec1;border-radius:7px;background:#f8fafb;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center}
+.line-slot{min-height:112px;padding:8px;border:1px dashed #aebec1;border-radius:7px;background:#f8fafb;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;cursor:pointer}
+.line-slot:hover,.line-slot.selected{border-style:solid;border-color:var(--accent);background:#eef8f4}
+.line-slot img{width:72px;height:64px;object-fit:contain;margin:3px 0}
+.line-slot.filled{border-style:solid}
 .line-slot span{font-variant-numeric:tabular-nums;color:var(--accent);font-size:11px}
 .line-slot small{color:var(--muted);font-size:10px}
+.line-special-preview{width:76px;height:76px;display:grid;place-items:center;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.line-special-preview canvas{max-width:100%;max-height:100%;object-fit:contain}
+.line-preview{height:250px;margin:12px 0;display:grid;place-items:center;border:1px solid var(--border);border-radius:7px;overflow:hidden}
+.line-preview canvas{max-width:100%;max-height:100%;object-fit:contain}
+.line-workspace.drag-over .line-stickers-panel{outline:3px solid #14816b55;outline-offset:-5px}
+#lineDownloads a{font-size:11px}
 .line-spec-summary{border-top:1px solid var(--border);padding-top:16px;margin-top:14px}
 .line-inspector{padding:16px;overflow:auto}
 .line-project-summary{white-space:pre-wrap;margin:12px 0;padding:12px;border-radius:7px;background:#eef3f4;color:#34464e;font:12px/1.7 ui-monospace,Consolas,monospace}

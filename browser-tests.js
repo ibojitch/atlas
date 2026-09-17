@@ -75,6 +75,16 @@
       R.renderPreview(preview,atlas,null,s); T.equal(Array.from(preview.getContext('2d').getImageData(0,0,1,1).data),[0,0,0,0]);
     }
   });
+  await test('LINE Preview / PNG / ZIPは同じ描画結果・透明背景・偶数寸法', async()=>{
+    const image=document.createElement('canvas');image.width=101;image.height=81;const ctx=image.getContext('2d');ctx.fillStyle='#f40';ctx.fillRect(11,7,71,55);
+    const rgba=ctx.getImageData(0,0,image.width,image.height).data,item={image,rgba,bounds:LineImageCore.alphaBounds(rgba,image.width,image.height,1),edit:{...LineStampCore.DEFAULT_EDIT,offsetX:2,offsetY:-3}},preview=document.createElement('canvas');
+    const plan=LineRenderer.sticker(preview,item),bytes=await LineRenderer.pngBytes(preview),dims=LineImageCore.parsePng(bytes);T.equal([dims.width,dims.height],[plan.width,plan.height]);if(dims.width%2||dims.height%2||dims.width>370||dims.height>320)throw new Error('LINE PNG寸法');
+    const bitmap=await createImageBitmap(new Blob([bytes],{type:'image/png'})),decoded=document.createElement('canvas');decoded.width=bitmap.width;decoded.height=bitmap.height;decoded.getContext('2d').drawImage(bitmap,0,0);bitmap.close();T.equal(Array.from(decoded.getContext('2d').getImageData(0,0,1,1).data),[0,0,0,0]);
+    const zip=ZipWriter.create([{name:'01.png',data:bytes}]),stored=ZipWriter.inspect(zip)[0];T.equal(stored.name,'01.png');T.equal(Array.from(stored.data),Array.from(bytes));
+  });
+  await test('LINE Main / Tab固定寸法・source選択・透明維持',async()=>{
+    const image=document.createElement('canvas');image.width=40;image.height=20;image.getContext('2d').fillRect(5,5,20,10);const rgba=image.getContext('2d').getImageData(0,0,40,20).data,item={image,bounds:LineImageCore.alphaBounds(rgba,40,20,1)},main=document.createElement('canvas'),tab=document.createElement('canvas');LineRenderer.special(main,item,240,240,LineStampCore.DEFAULT_SPECIAL);LineRenderer.special(tab,item,96,74,LineStampCore.DEFAULT_SPECIAL);T.equal([main.width,main.height,tab.width,tab.height],[240,240,96,74]);T.equal(Array.from(main.getContext('2d').getImageData(0,0,1,1).data),[0,0,0,0]);T.equal(Array.from(tab.getContext('2d').getImageData(0,0,1,1).data),[0,0,0,0]);
+  });
   for (const r of results) { const li = document.createElement('li'); li.textContent = `${r.ok ? 'PASS' : 'FAIL'} — ${r.name}${r.error ? ': ' + r.error : ''}`; li.style.color = r.ok ? '#17694f' : '#b32424'; document.getElementById('testResults').append(li); }
   const passed = results.filter(r => r.ok).length;
   document.getElementById('testSummary').textContent = `${passed} / ${results.length} 成功`;

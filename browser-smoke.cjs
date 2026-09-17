@@ -4,7 +4,7 @@
  */
 'use strict';
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { spawn } = require('node:child_process'), { pathToFileURL } = require('node:url');
+const { spawn, spawnSync } = require('node:child_process'), { pathToFileURL } = require('node:url');
 let executable, profile, child, spawnError, browserStderr = '', phase = 'browser detection', port, endpointStatus = 'not requested';
 const START_TIMEOUT = 15000, CDP_TIMEOUT = 20000;
 function findBrowser() {
@@ -128,7 +128,7 @@ async function main() {
   await check('Atlas→LINEでAtlas stateとdirtyを維持', "document.getElementById('atlasWorkspace').hidden && !document.getElementById('lineWorkspace').hidden && document.getElementById('imageCount').textContent==='1' && WorkspaceShell.state.atlas.dirty");
   await evaluate("const ignored=new DataTransfer();ignored.items.add(new File(['ignored'],'line-drop.png',{type:'image/png'}));window.dispatchEvent(new DragEvent('drop',{dataTransfer:ignored,bubbles:true,cancelable:true}));window.dispatchEvent(new ClipboardEvent('paste',{clipboardData:ignored,bubbles:true,cancelable:true}))");
   await check('LINE表示中のdrop/pasteは隠れたAtlasへ追加しない', "document.getElementById('imageCount').textContent==='1'");
-  await check('Static予定数とPhase 1仕様を表示', "Array.from(document.getElementById('lineStickerCount').options).map(o=>o.value).join(',')==='8,16,24,32,40' && document.getElementById('lineStickerSpec').textContent.includes('370 × 320') && document.querySelectorAll('.line-slot').length===8");
+  await check('Static予定数とPhase 2仕様を表示', "Array.from(document.getElementById('lineStickerCount').options).map(o=>o.value).join(',')==='8,16,24,32,40' && document.getElementById('lineStickerSpec').textContent.includes('370 × 320') && document.querySelectorAll('.line-slot').length===8 && !document.getElementById('lineStaticTools').hidden");
   await evaluate("document.getElementById('lineStickerCount').value='40';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}))");
   await check('UIでもStatic 40→Animated 24へ丸めslot番号を維持', "document.getElementById('lineStickerCount').value==='24' && document.querySelectorAll('.line-slot').length===24 && document.querySelector('.line-slot').dataset.slot==='1' && document.querySelector('.line-slot:last-child').dataset.slot==='24'");
   await evaluate("document.getElementById('lineType').value='static';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='8';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
@@ -148,6 +148,29 @@ async function main() {
   await evaluate("loadLineText(JSON.stringify({format:'line-stamp-project',version:1,type:'static',targetStickerCount:40,mainImage:null,tabImage:null,stickers:[]}))");
   await until("document.getElementById('lineNotice').textContent.includes('40個のLINE Project')");
   await check('LINE Project LOAD成功後dirty=false・type/count復元', "document.getElementById('lineType').value==='static' && document.getElementById('lineStickerCount').value==='40' && !WorkspaceShell.state.line.dirty");
+  await evaluate("document.getElementById('lineNewProject').click()");
+  await evaluate(`window.addLineSet=async()=>{const dt=new DataTransfer();for(let n=1;n<=8;n++){const c=document.createElement('canvas');c.width=80+n;c.height=60+n;const x=5+n%3,y=4+n%2,ctx=c.getContext('2d');ctx.fillStyle='hsl('+n*40+' 80% 50%)';ctx.fillRect(x,y,50,40);dt.items.add(new File([await new Promise(r=>c.toBlob(r))],'stamp-'+n+'.png',{type:'image/png'}));}const input=document.getElementById('lineImageInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));};await addLineSet();`);
+  await until("document.querySelectorAll('.line-slot.filled').length===8 && !document.getElementById('lineInspectorContent').hidden");
+  await check('Static複数画像読込・元画像寸法・自動trim preview', "document.getElementById('lineProjectSummary').textContent.includes('Sticker: 8 / 8') && document.querySelector('.line-slot[data-slot=\"1\"] small').textContent==='stamp-1.png' && document.getElementById('linePreviewInfo').textContent.includes('元 88×68') && document.getElementById('linePreviewCanvas').width%2===0 && document.getElementById('linePreviewCanvas').width<=370");
+  await evaluate("document.querySelector('.line-slot[data-slot=\"1\"]').click();document.getElementById('lineOffsetX').value='3';document.getElementById('lineOffsetX').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineOffsetY').value='-2';document.getElementById('lineOffsetY').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineUseMain').click();document.getElementById('lineUseTab').click();document.getElementById('lineMoveDown').click()");
+  await check('offset・並べ替え・安定IDのMain/Tab参照・dirty独立', "document.querySelector('.line-slot[data-slot=\"2\"] small').textContent==='stamp-1.png' && document.getElementById('lineMainStatus').textContent.includes('02 stamp-1.png') && document.getElementById('lineTabStatus').textContent.includes('02 stamp-1.png') && WorkspaceShell.state.line.dirty && WorkspaceShell.state.atlas.dirty");
+  await evaluate("document.getElementById('linePrepareOutput').click()");
+  await until("document.getElementById('lineDownloads').querySelectorAll('a').length===11");
+  await check('Main/Tab/8 Sticker/ZIP生成・公式名・寸法', "Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).map(a=>a.download).join(',')==='main.png,tab.png,01.png,02.png,03.png,04.png,05.png,06.png,07.png,08.png,line-static-stickers.zip' && document.getElementById('lineMainCanvas').width===240 && document.getElementById('lineMainCanvas').height===240 && document.getElementById('lineTabCanvas').width===96 && document.getElementById('lineTabCanvas').height===74");
+  await evaluate("window.lineZipBytes=new Uint8Array(await(await fetch(Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).at(-1).href)).arrayBuffer());window.lineZipFiles=ZipWriter.inspect(lineZipBytes);Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).at(-1).click()");
+  await check('ZIP STORE CRC・格納PNG bytes・root filenames一致', "lineZipFiles.length===10 && lineZipFiles.map(f=>f.name).join(',')==='main.png,tab.png,01.png,02.png,03.png,04.png,05.png,06.png,07.png,08.png' && lineZipFiles.every(f=>LineImageCore.parsePng(f.data).width>0)");
+  for(let n=0;n<100&&!fs.existsSync(path.join(profile,'downloads','line-static-stickers.zip'));n++)await pause(50);
+  const zipPath=path.join(profile,'downloads','line-static-stickers.zip'),expandPath=path.join(profile,'expanded-line-zip');
+  if(process.platform==='win32'){
+    fs.mkdirSync(expandPath);phase='Windows standard tar ZIP validation';const expanded=spawnSync('tar.exe',['-xf',zipPath,'-C',expandPath],{windowsHide:true,encoding:'utf8'});
+    if(expanded.status!==0)throw new Error('Windows標準tar ZIP展開失敗: '+expanded.stderr);
+    if(fs.readdirSync(expandPath).sort().join(',')!==['01.png','02.png','03.png','04.png','05.png','06.png','07.png','08.png','main.png','tab.png'].sort().join(','))throw new Error('Windows展開後ファイル名が不正');
+    console.log('PASS Windows標準tarでZIP展開');passed++;
+  }
+  await evaluate("document.getElementById('linePrepareProject').click()");await until("!document.getElementById('lineSaveProject').hidden");await evaluate("window.lineV2=await(await fetch(document.getElementById('lineSaveProject').href)).json();window.lineV2Signature=JSON.stringify(lineV2);loadLineText(JSON.stringify(lineV2))");await until("document.getElementById('lineNotice').textContent.includes('8個のLINE Project')");
+  await check('LINE Project v2元画像・編集値・順番・Main/Tab SAVE→LOAD', "lineV2.version===2 && lineV2.stickers.length===8 && lineV2.stickers.find(s=>s.source.name==='stamp-1.png').slot===2 && lineV2.stickers.find(s=>s.source.name==='stamp-1.png').edit.offsetX===3 && lineV2.mainImage.sourceStickerId===lineV2.tabImage.sourceStickerId && document.getElementById('lineMainStatus').textContent.includes('stamp-1.png') && !WorkspaceShell.state.line.dirty");
+  await evaluate("const p=structuredClone(lineV2);p.stickers[0].source.data='data:image/png;base64,broken';window.lineAtomicBefore=document.getElementById('lineProjectSummary').textContent;loadLineText(JSON.stringify(p))");await until("document.getElementById('lineNotice').textContent.includes('現在の編集内容は維持')");
+  await check('壊れたv2埋込画像もatomic LOAD', "document.getElementById('lineProjectSummary').textContent===lineAtomicBefore && !WorkspaceShell.state.line.dirty");
   await evaluate("document.getElementById('lineStickerCount').value='32';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
   nextDialogAccept = false; await evaluate("document.getElementById('lineNewProject').click()");
   await check('dirtyなLINE新規作成のキャンセルは状態を変更しない', "document.getElementById('lineType').value==='static' && document.getElementById('lineStickerCount').value==='32' && WorkspaceShell.state.line.dirty");
@@ -352,7 +375,7 @@ async function main() {
   await reload();
   await check('localStorage利用不可でも起動・警告', "document.getElementById('nextFilename').textContent.includes('_0000.png') && document.getElementById('notice').classList.contains('warning')");
   if (process.env.ATLAS_SCREENSHOT) {
-    await evaluate("document.getElementById('workspace-line').click();document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='24';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));window.scrollTo(0,0)");
+    await evaluate("document.getElementById('workspace-line').click();document.getElementById('lineType').value='static';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='8';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));window.scrollTo(0,0)");
     const lineShot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.resolve(process.env.ATLAS_SCREENSHOT),Buffer.from(lineShot.data,'base64'));
   }
   await send('Page.navigate', { url: pathToFileURL(path.join(__dirname, 'tests.html')).href });

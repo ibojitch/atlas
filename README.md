@@ -12,33 +12,35 @@ HTML / CSS / Vanilla JavaScriptのみで動作します。外部ライブラリ�
 
 未保存変更があるProjectのLOAD、新規作成、全削除では確認ダイアログを表示します。キャンセルすると現在の状態を変更しません。ワークスペース切替では確認しません。AtlasまたはLINEのどちらかに未保存変更がある場合や、既存の書き出し準備・保存・読込処理中は、ページ更新やタブを閉じる際にブラウザ標準の離脱確認を使用します。
 
-### LINEスタンプ — Phase 1
+### LINEスタンプ — Static Phase 2
 
-LINEワークスペースは現在Phase 1です。Static / Animated、スタンプ予定数、Main Image、Tab Image、Stickerスロットを1つのversion付きProjectとして管理する基盤と、Project SAVE / LOADを提供します。
+LINEワークスペースでは、Static Stickerの元画像読込からtrim、fit、位置調整、Main / Tab生成、個別PNG、提出用ZIPまでを完結できます。複数選択、drop、paste、スロット差し替え・削除・並べ替えに対応し、Preview・個別PNG・ZIPは同じ描画処理を使います。
 
 ```json
 {
   "format": "line-stamp-project",
-  "version": 1,
+  "version": 2,
   "type": "static",
   "targetStickerCount": 8,
-  "mainImage": null,
-  "tabImage": null,
+  "mainImage": { "sourceStickerId": null, "offsetX": 0, "offsetY": 0 },
+  "tabImage": { "sourceStickerId": null, "offsetX": 0, "offsetY": 0 },
   "stickers": []
 }
 ```
 
-Staticは8 / 16 / 24 / 32 / 40個、Animatedは8 / 16 / 24個を選択できます。Mainは240×240px、Tabは96×74px、Static Stickerは最大370×320px、Animated Stickerは最大320×270pxです。1画像1MB以下、Animatedの5～20 frames、loop 1～4、合計4秒以内、1 / 2 / 3 / 4秒、全frame同寸法という基準を将来のvalidation用定数として保持します。
+Staticは8 / 16 / 24 / 32 / 40個から選択します。Stickerはalphaしきい値より大きい画素へtrimし、アスペクト比を保って最大370×320px以内・縦横偶数・約10px余白の可変Canvasへ配置します。Mainは240×240px、Tabは96×74px固定で、任意Stickerの元画像と専用offsetから生成します。
 
-### Phase 1.1の型切替と将来スロット
+ZIPは外部ライブラリを使わないSTORE方式で、CRC32、local header、central directory、end recordを生成します。直下に`main.png`、`tab.png`、`01.png`以降の連番だけを格納します。各PNG 1MB以下、必要スロット、Main / Tab、ZIP 60MB以下を出力前に検証します。Canvasが保証できない72dpi metadataと厳密なRGB profileはvalidation対象外としてUIに明示します。
 
-Static / Animatedのtype切替はProjectを作り直しません。`format`、`version`、Main、Tab、Stickers、将来の編集情報を保持し、typeと予定数だけを新しい制約へ合わせます。現在数が新しいtypeで使えない場合は、利用可能な候補のうち**現在値以下で最大の数**へ丸めます。したがってStatic 40 / 32はAnimated 24へ、24 / 16 / 8は同じ数へ移行します。AnimatedからStaticへの8 / 16 / 24は維持します。将来、切替後の画像が制約を満たさない場合も自動削除・縮小・変換はせず、validation errorとして扱う方針です。
+### Project v2とスロット
 
-Phase 2のSticker Objectは、配列位置だけに依存せず、1始まりの明示的な`slot`番号を持たせます。これにより「03番が未設定」「07番を差し替え」のような操作でも順番を安定して管理します。Project version 1は互換性維持のため引き続き`stickers: []`で保存し、実画像ObjectのschemaはPhase 2で導入します。
+Static / Animatedのtype切替では、現在数を新しいtypeで利用可能な候補のうち**現在値以下で最大の数**へ丸めます。Static画像が存在する状態でAnimatedへ切り替える場合は、画像を暗黙に変換せず確認後に新しい空Projectへ切り替えます。Static 40 / 32はAnimated 24へ、24 / 16 / 8は同じ数へ移行します。AnimatedからStaticへの8 / 16 / 24は維持します。
+
+Sticker Objectは、配列位置だけに依存せず、安定IDと1始まりの明示的な`slot`番号を持ちます。Main / TabはIDを参照するため並べ替え後も同じ絵を維持します。Project v2は元画像のData URL、元寸法、trim / fit / offset、Main / Tab専用値を保存し、一時Canvas、ImageBitmap、Object URL、Preview、ZIP Blobは保存しません。Project v1は空Sticker ProjectとしてLOADし、v2へ移行します。LOADは全画像を一時領域で検証・decodeしてから入れ替えるatomic方式です。
 
 共通制約は各画像1MB以下、ZIP全体60MB以下、RGB、背景透過です。Static固有制約はPNG、最大370×320px、縦横偶数、72dpi以上、コンテンツ外周に約10pxの余白推奨です。Animated固有制約はAPNG、最大320×270px、縦横いずれか270px以上、全frame同寸法、5～20 frames、loop 1～4、再生時間1 / 2 / 3 / 4秒、合計4秒以内、frame余白と動かない部分の除去、1frame目を静止表示にも使用、です。Static固有の偶数サイズ・72dpi以上はAnimatedへ共通化していません。
 
-Phase 1では実画像の読込・加工、LINE用trim / resize、Main / Tab自動生成、PNG一括出力、ZIP、APNG解析・生成を行いません。**APNG Exportは未実装**です。外部ライブラリや疑似APNG生成も含めていません。
+Animated StickerはUI上で開発中と表示します。**APNG Exportは未実装**です。APNG decode / encode、frame editor、外部APNGライブラリは含めていません。画像の純粋計算、Canvas描画、ZIP、Projectモデルを分離し、将来のAnimated encoder層を追加できる構造にしています。
 
 ## 起動方法
 
@@ -321,6 +323,10 @@ LOADはatomicです。JSON、format/version、settings、Tags、Animation、Grou
 - `style.css` — デスクトップ中心のレスポンシブUI、チェッカー、境界オーバーレイ。
 - `atlas-core.js` — DOM非依存のalpha解析、Grid・Tags・Project構造検証、fit、共通倍率、配置、レイアウト、JSON、Animation順序・時間・検証、名前・連番・設定検証。
 - `atlas-render.js` — 描画計画をCanvasへ描く処理、最終Atlasのセルを切り出す共通プレビュー、PNG生成。テストでも同じ処理を利用。
+- `line-core.js` — LINE Project v1移行/v2検証、明示slot、並べ替え・削除・出力validation。
+- `line-image-core.js` / `line-render.js` — LINE用alpha trim・fit計画と、Preview / PNG / ZIP共通Canvas描画。
+- `zip-writer.js` — CRC32を含む外部依存なしのZIP STORE writer。
+- `line-app.js` — Static画像入力、Inspector、Main / Tab、atomic LOAD、PNG / ZIPダウンロード。
 - `app.js` — 明示的な状態オブジェクト、共通Sprite生成、Grid分割、Project画像serialization/atomic LOAD、Sprite選択、Inspector、Group共有FPS、再生、入力、画像リソース解放、設定保存、ダウンロード。
 - `core-tests.js` — 純粋関数の自動テスト。
 - `tests.html` / `browser-tests.js` — ブラウザ上での計算・PNG画素テスト。
@@ -330,7 +336,7 @@ LOADはatomicです。JSON、format/version、settings、Tags、Animation、Grou
 
 ### Node不要のブラウザテスト
 
-`tests.html`を直接開くと58項目を実行します。PNGを再デコードして全画素の色・透明度をJSONの配置と比較するほか、Grid境界、Tags正規化、Project v1/v2構造検証も含みます。Node単独の`core-tests.js`は50項目です。
+`tests.html`を直接開くと74項目を実行します。PNGを再デコードして画素・透明度を確認するほか、LINE trim / fit、Project v1/v2、Main / Tab、ZIP CRCと格納PNG一致も検証します。Node単独の`core-tests.js`は64項目です。
 
 ### 任意の開発用テスト
 
@@ -356,4 +362,4 @@ node browser-smoke.cjs
 
 終了時にはChrome終了を待ち、作成した一時ディレクトリがOSのtemporary directory直下のatlas-smoke-*であることを確認してから削除します。失敗時やSIGINT/SIGTERMも可能な範囲で後始末します。OSによる強制終了では一時フォルダが残る場合があります。ユーザーの通常Chromeプロファイルは変更しません。スクリーンショットを残す場合だけATLAS_SCREENSHOTに保存先ファイルの絶対パスを指定してください（既存ファイルは上書きします）。既定ではダウンロードしたテストPNG/JSONも一時プロファイルと一緒に削除します。
 
-画面操作65項目で既存の読込・保存・反転コピー・連番・Animation・レスポンシブUIに加え、1280×684のGrid分割、Tags、通常Projectの画素一致、LOAD後の追加Sprite、古い保存リンクの無効化、Compactの容量削減・再LOAD、malformed JSON等のatomic LOAD失敗を検証します。続けて58項目の計算・Canvas・PNGテストを実行します。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。
+画面操作87項目で既存Atlas回帰に加え、LINE Static 8枚読込、trim / offset / 並べ替え、Main / Tab、全PNG / ZIP、Project v1/v2、atomic LOADを検証します。ZIPはWindows標準`tar`でも実際に展開します。続けて74項目の計算・Canvas・PNGテストを実行します。対話的な保存ダイアログやLINE Creators Marketへの実アップロードは自動テストの対象外です。

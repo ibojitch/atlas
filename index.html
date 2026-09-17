@@ -58,6 +58,26 @@
         <button id="splitFiles" type="button">複数キャラPNGを分割して追加</button>
         <input id="splitInput" type="file" accept="image/png,.png" hidden>
         <p class="hint">透過PNG・横1列・最大8島。抽出キャラは重心X／下端Yで配置します。島分けの変更は削除して再追加してください。</p>
+        <fieldset class="spaced grid-import"><legend>Sprite Atlasを分割して追加</legend>
+          <button id="pickGrid" type="button">Atlas画像を選択</button><input id="gridInput" type="file" accept="image/*" hidden>
+          <div class="form-grid spaced">
+            <label>Cell幅 <span>px</span><input id="gridCellWidth" type="number" min="1" max="4096" step="1" value="1" required></label>
+            <label>Cell高さ <span>px</span><input id="gridCellHeight" type="number" min="1" max="4096" step="1" value="1" required></label>
+            <label>列数<input id="gridColumns" type="number" min="1" max="64" step="1" value="1" required></label>
+            <label>行数<input id="gridRows" type="number" min="1" max="64" step="1" value="1" required></label>
+          </div>
+          <p id="gridInference" class="hint">画像選択後にGrid候補を提示します。</p>
+          <p id="gridSummary" class="grid-summary">Atlas画像を選択すると、推定値とセル数を表示します。</p>
+          <p id="gridValidation" class="field-error" hidden></p>
+          <button id="addGrid" class="primary" type="button" disabled>非透明セルを分割追加</button>
+          <p class="hint">矩形セル単位で切り出します。推定値は補助なので、分割前に画像寸法・Cell・列・行を確認してください。完全透明セルは追加しません。</p>
+        </fieldset>
+      </section>
+      <section class="panel project-panel" aria-label="編集Project">
+        <h2>編集Project</h2>
+        <div class="button-row"><button id="prepareProject" type="button" disabled>Projectを用意</button><a id="saveProjectLink" class="button" hidden>Projectを保存</a><button id="loadProject" type="button">ProjectをLOAD</button></div>
+        <input id="projectInput" type="file" accept=".json,.satlas.json,application/json" hidden>
+        <p class="hint">画像・順番・Tags・offset・Animation・出力設定を.satlas.jsonに保存します。Runtime用PNG/JSONとは別で、連番を進めません。</p>
       </section>
       <section class="export-panel" aria-label="書き出し">
         <div class="export-bar"><div><strong id="nextFilename">—</strong><p class="hint">透過PNG + 座標インデックスJSON</p></div><button id="exportButton" class="primary" type="button" disabled>PNG + JSON を用意</button></div>
@@ -86,6 +106,8 @@
         <p id="selectedStatus" class="hint"></p>
         <form id="spriteForm" novalidate>
           <label>名前<input id="spriteName" data-action="rename" maxlength="200"></label>
+          <label class="spaced">Tags<input id="spriteTags" maxlength="4096" placeholder="purple, motion:walk, direction:right"></label>
+          <p class="hint">カンマ区切り。空白・空要素・完全一致の重複は整理します。最大32個、各64文字。</p>
           <div class="offset-controls">
             <label>offsetX<input id="offsetX" data-action="offsetX" type="number" step="1" required></label>
             <button type="button" data-action="offsetX" data-delta="-1" aria-label="Xを1px減らす">−1</button><button type="button" data-action="offsetX" data-delta="1" aria-label="Xを1px増やす">+1</button>
@@ -93,6 +115,13 @@
             <button type="button" data-action="offsetY" data-delta="-1" aria-label="Yを1px減らす">−1</button><button type="button" data-action="offsetY" data-delta="1" aria-label="Yを1px増やす">+1</button>
           </div>
           <p id="placementHelp" class="hint"></p>
+          <fieldset class="spaced"><legend>Transform Copy</legend>
+            <div class="button-row transform-copy-row">
+              <button id="flipHorizontalCopy" type="button">左右反転コピー</button>
+              <button id="flipVerticalCopy" type="button">上下反転コピー</button>
+            </div>
+            <p class="hint">選択Spriteを反転した実画像として複製し、元Spriteの直後に追加します。名前・offsetは引き継ぎ、Animation Groupは未所属にします。</p>
+          </fieldset>
           <fieldset class="spaced"><legend>Animation</legend>
             <label>Group ID<input id="groupId" maxlength="200" placeholder="未所属"></label>
             <div class="form-grid spaced">

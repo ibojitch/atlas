@@ -51,6 +51,37 @@
   test('設定復元：大きいセルと余白の組み合わせを保持', () => { const s = settings({ cellWidth: 512, cellHeight: 512, padding: 100 }); equal(C.restoreSettings(s), s); });
   test('設定復元：相互制約違反は初期値へ', () => equal(C.restoreSettings({ cellWidth: 10, padding: 8 }), { ...C.DEFAULTS }));
   test('名前重複・空白・特殊名の一意化', () => { equal(C.uniqueName('idle', new Set(['idle', 'idle_2'])), 'idle_3'); equal(C.uniqueName('  ', new Set()), 'sprite'); equal(C.uniqueName('__proto__', new Set()), '__proto__'); });
+  test('Tagsのtrim・空要素・完全一致重複・大文字小文字', () => {
+    equal(C.normalizeTags(' purple, walk, ,purple, Walk, character:purple '), ['purple','walk','Walk','character:purple']);
+    equal(C.normalizeTags([]), []);
+  });
+  test('Tagsは最大32個・各64文字・型不正を拒否', () => {
+    equal(C.normalizeTags(Array.from({length:32},(_,i)=>`tag${i}`)).length,32);
+    throws(()=>C.normalizeTags(Array.from({length:33},(_,i)=>`tag${i}`)));
+    throws(()=>C.normalizeTags(['x'.repeat(65)])); throws(()=>C.normalizeTags([1]));
+  });
+  test('Gridは非正方形Cell・512セル・64列/行境界を許可', () => {
+    equal(C.validateGrid({imageWidth:1280,imageHeight:684,cellWidth:160,cellHeight:228,columns:8,rows:3}).cells,24);
+    equal(C.validateGrid({imageWidth:64,imageHeight:8,cellWidth:1,cellHeight:1,columns:64,rows:8}).cells,512);
+    equal(C.validateGrid({imageWidth:8,imageHeight:64,cellWidth:1,cellHeight:1,columns:8,rows:64}).cells,512);
+  });
+  test('Gridは513セル・65列/行・寸法不一致・不正値を拒否', () => {
+    throws(()=>C.validateGrid({imageWidth:27,imageHeight:19,cellWidth:1,cellHeight:1,columns:27,rows:19}));
+    throws(()=>C.validateGrid({imageWidth:65,imageHeight:1,cellWidth:1,cellHeight:1,columns:65,rows:1}));
+    throws(()=>C.validateGrid({imageWidth:1,imageHeight:65,cellWidth:1,cellHeight:1,columns:1,rows:65}));
+    throws(()=>C.validateGrid({imageWidth:10,imageHeight:10,cellWidth:3,cellHeight:5,columns:3,rows:2}));
+    throws(()=>C.validateGrid({imageWidth:10,imageHeight:10,cellWidth:0,cellHeight:5,columns:2,rows:2}));
+  });
+  test('Grid追加容量はmaxImages・totalPixels超過前に一括拒否', () => {
+    equal(C.validateAddition(483,1000,17,1700),{count:500,pixels:2700});
+    throws(()=>C.validateAddition(484,1000,17,1700));
+    throws(()=>C.validateAddition(0,C.LIMITS.maxTotalSourcePixels-10,1,11));
+  });
+  test('Grid推定は透明境界の8列×3行を候補提示', () => {
+    const width=80,height=30,data=new Uint8ClampedArray(width*height*4);
+    for(let row=0;row<3;row++)for(let col=0;col<8;col++){if(row===2&&col>0)continue;for(let y=row*10+2;y<row*10+8;y++)for(let x=col*10+2;x<col*10+8;x++)data[(y*width+x)*4+3]=255;}
+    equal(C.inferGrid(data,width,height),{columns:8,rows:3,cellWidth:10,cellHeight:10,confidence:'suggested'});
+  });
   test('連番・日付変更・壊れた保存値・4桁以上', () => {
     equal(C.nextSequence({ date: '20260916', last: 2 }, '20260916'), 3); equal(C.nextSequence({ date: '20260915', last: 99 }, '20260916'), 0);
     equal(C.nextSequence(null, '20260916'), 0); equal(C.nextSequence({ date: '20260916', last: '3' }, '20260916'), 0);
@@ -169,6 +200,17 @@
     const s=settings(), p=C.makePlan([a,b],s), j=C.metadata(p,s,'a.png');
     equal(j.animations.walk.frames.map(f=>f.sprite),[1,0]); equal(j.sprites,p.sprites); equal(j.meta.atlasWidth,p.width);
     for(const f of j.animations.walk.frames) equal(j.sprites[f.sprite].durationFrames,f.duration);
+  });
+  test('Runtime JSONは正規化済みTagsを追加フィールドとして出力', () => {
+    const i=item(10,10);i.tags=[' purple ','walk','walk'];const sprite=C.makePlan([i],settings()).sprites[0];equal(sprite.tags,['purple','walk']);
+  });
+  test('Project v1構造・Tags・Animation・Group FPSを検証', () => {
+    const project={format:'sprite-atlas-project',version:1,settings:settings(),groups:[{id:'walk',fps:24}],sprites:[{
+      name:'hero',source:'hero.png',tags:[' purple ','walk'],width:2,height:3,image:'data:image/png;base64,AA==',offsetX:1,offsetY:-2,extracted:false,groupId:'walk',animationOrder:2,durationFrames:3}]};
+    const validated=C.validateProject(project);equal(validated.settings,settings());equal(validated.sprites[0].tags,['purple','walk']);equal(validated.groups.get('walk').fps,24);
+    for(const mutate of [p=>p.format='wrong',p=>p.version=2,p=>p.settings.cellWidth=0,p=>p.sprites[0].tags=['x'.repeat(65)],p=>p.sprites[0].animationOrder=-1,p=>p.groups[0].fps=0]){
+      const broken=JSON.parse(JSON.stringify(project));mutate(broken);throws(()=>C.validateProject(broken));
+    }
   });
   test('経過時間再生の境界・遅延・ループ・非ループ終端', () => {
     const a={fps:60,frames:[{sprite:2,duration:3},{sprite:0,duration:6}]};

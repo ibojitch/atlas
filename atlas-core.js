@@ -5,7 +5,9 @@
     columns: 4, threshold: 1, margin: 0, scaleMode: 'individual',
     alignment: 'center', smoothing: 'smooth', pot: false, upscale: true, minIslandPixels: 100 });
   const LIMITS = Object.freeze({ maxSide: 8192, maxPixels: 33554432,
-    maxSourcePixels: 33554432, maxTotalSourcePixels: 100663296, maxImages: 500 });
+    maxSourcePixels: 33554432, maxTotalSourcePixels: 100663296, maxImages: 500,
+    maxGridSide: 4096, maxGridColumns: 64, maxGridRows: 64, maxGridCells: 512,
+    maxTags: 32, maxTagLength: 64 });
   const ALIGNMENTS = ['top-left', 'top-center', 'top-right', 'center-left',
     'center', 'center-right', 'bottom-left', 'bottom-center', 'bottom-right'];
 
@@ -124,6 +126,63 @@
     }
     return pixels;
   }
+  function normalizeTags(value) {
+    if (value === undefined || value === null || value === '') return [];
+    const raw = Array.isArray(value) ? value : typeof value === 'string' ? value.split(',') : null;
+    if (!raw) throw new Error('Tagsは文字列または文字列配列にしてください。');
+    const tags = [], seen = new Set();
+    for (const entry of raw) {
+      if (typeof entry !== 'string') throw new Error('各tagは文字列にしてください。');
+      const tag = entry.trim();
+      if (!tag || seen.has(tag)) continue;
+      if (tag.length > LIMITS.maxTagLength) throw new Error(`1 tagは${LIMITS.maxTagLength}文字以下にしてください。`);
+      seen.add(tag); tags.push(tag);
+    }
+    if (tags.length > LIMITS.maxTags) throw new Error(`1 Spriteのtagは${LIMITS.maxTags}個までです。`);
+    return tags;
+  }
+  function validateGrid(grid) {
+    const values = {};
+    for (const key of ['imageWidth', 'imageHeight', 'cellWidth', 'cellHeight', 'columns', 'rows']) {
+      if (!Number.isSafeInteger(grid?.[key]) || grid[key] < 1) throw new Error('Gridの画像・セル寸法、列数、行数は正の整数にしてください。');
+      values[key] = grid[key];
+    }
+    if (values.imageWidth > LIMITS.maxGridSide || values.imageHeight > LIMITS.maxGridSide) throw new Error(`Grid Atlasは各辺${LIMITS.maxGridSide}px以下にしてください。`);
+    if (values.columns > LIMITS.maxGridColumns || values.rows > LIMITS.maxGridRows) throw new Error(`Gridは最大${LIMITS.maxGridColumns}列 × ${LIMITS.maxGridRows}行です。`);
+    const cells = values.columns * values.rows;
+    if (!Number.isSafeInteger(cells) || cells > LIMITS.maxGridCells) throw new Error(`Gridセルは最大${LIMITS.maxGridCells}個です。`);
+    if (values.cellWidth * values.columns !== values.imageWidth || values.cellHeight * values.rows !== values.imageHeight) throw new Error('セル寸法 × 列・行数をAtlas画像寸法と一致させてください。');
+    return { ...values, cells };
+  }
+  function validateAddition(currentCount, currentPixels, addedCount, addedPixels) {
+    for (const value of [currentCount, currentPixels, addedCount, addedPixels]) if (!Number.isSafeInteger(value) || value < 0) throw new Error('追加数または画素数が不正です。');
+    if (currentCount + addedCount > LIMITS.maxImages) throw new Error(`追加後の画像が上限${LIMITS.maxImages}枚を超えます。`);
+    if (currentPixels + addedPixels > LIMITS.maxTotalSourcePixels) throw new Error('追加後の読み込み済み画像合計が96M画素を超えます。');
+    return { count: currentCount + addedCount, pixels: currentPixels + addedPixels };
+  }
+  function occupiedIntervals(data, width, height, axis) {
+    const length = axis === 'x' ? width : height, occupied = new Uint8Array(length);
+    for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+      if (data[(y * width + x) * 4 + 3]) occupied[axis === 'x' ? x : y] = 1;
+    }
+    const intervals = [];
+    for (let i = 0; i < length;) {
+      while (i < length && !occupied[i]) i++;
+      if (i >= length) break;
+      const start = i; while (i < length && occupied[i]) i++;
+      intervals.push({ start, end: i - 1 });
+    }
+    return intervals;
+  }
+  function inferGrid(data, width, height) {
+    if (!(data instanceof Uint8ClampedArray) || data.length !== width * height * 4 || width < 1 || height < 1 || width > LIMITS.maxGridSide || height > LIMITS.maxGridSide) throw new Error('Grid推定用の画像データが不正です。');
+    const xs = occupiedIntervals(data, width, height, 'x'), ys = occupiedIntervals(data, width, height, 'y');
+    const columns = xs.length, rows = ys.length;
+    if (columns > 0 && rows > 0 && columns * rows > 1 && columns <= LIMITS.maxGridColumns && rows <= LIMITS.maxGridRows && columns * rows <= LIMITS.maxGridCells && width % columns === 0 && height % rows === 0) {
+      return { columns, rows, cellWidth: width / columns, cellHeight: height / rows, confidence: 'suggested' };
+    }
+    return { columns: 1, rows: 1, cellWidth: width, cellHeight: height, confidence: 'ambiguous' };
+  }
   function itemScale(item, s) {
     // 重心が偏っていても初期配置が余白内に収まる幅でfitする。
     const a = item.anchor, t = item.trim;
@@ -177,7 +236,7 @@
       const contentDraw = { x: draw.x + (item.bounds.x - item.trim.x) * scale,
         y: draw.y + (item.bounds.y - item.trim.y) * scale,
         width: item.bounds.width * scale, height: item.bounds.height * scale };
-      return { index, name: item.name, source: item.source, ...cellPosition(index, s),
+      return { index, name: item.name, source: item.source, tags: normalizeTags(item.tags), ...cellPosition(index, s),
         width: s.cellWidth, height: s.cellHeight, sourceWidth: item.width, sourceHeight: item.height,
         trim: { ...item.trim }, bounds: { ...item.bounds }, draw, contentDraw, scale,
         offsetX, offsetY, ...animationProperties(item), ...(item.anchor ? { anchor: { ...item.anchor }, placement: 'centroid-bottom' } : {}) };
@@ -221,6 +280,37 @@
       } catch (error) { errors.push(`${item.name}: ${error.message}`); }
     }
     return [...new Set(errors)];
+  }
+  function validateProject(project) {
+    if (!project || typeof project !== 'object' || Array.isArray(project)) throw new Error('Project JSONのルートが不正です。');
+    if (project.format !== 'sprite-atlas-project' || project.version !== 1) throw new Error('対応していないProject形式またはversionです。');
+    if (!project.settings || typeof project.settings !== 'object') throw new Error('Projectのsettingsが不正です。');
+    const settings = {};
+    for (const key of Object.keys(DEFAULTS)) {
+      if (!Object.hasOwn(project.settings, key)) throw new Error(`Project settingsに${key}がありません。`);
+      settings[key] = project.settings[key];
+    }
+    const settingErrors = validateSettings(settings); if (settingErrors.length) throw new Error(settingErrors.join(' '));
+    if (!Array.isArray(project.sprites) || project.sprites.length > LIMITS.maxImages) throw new Error(`ProjectのSpriteは${LIMITS.maxImages}件までです。`);
+    if (!Array.isArray(project.groups)) throw new Error('Projectのgroupsが不正です。');
+    const groups = new Map();
+    for (const group of project.groups) {
+      if (!group || typeof group.id !== 'string' || !group.id.trim() || group.id !== group.id.trim() || group.id.length > 200 || groups.has(group.id)) throw new Error('ProjectのGroup IDが不正または重複しています。');
+      groups.set(group.id, { id: group.id, fps: validateFps(group.fps) });
+    }
+    const sprites = project.sprites.map((sprite, index) => {
+      if (!sprite || typeof sprite !== 'object') throw new Error(`Sprite ${index + 1}が不正です。`);
+      if (typeof sprite.name !== 'string' || !sprite.name.trim() || sprite.name.length > 200 || typeof sprite.source !== 'string') throw new Error(`Sprite ${index + 1}の名前またはsourceが不正です。`);
+      if (typeof sprite.image !== 'string' || !sprite.image.startsWith('data:image/png;base64,')) throw new Error(`Sprite ${index + 1}の埋め込み画像が不正です。`);
+      if (!Number.isSafeInteger(sprite.width) || sprite.width < 1 || !Number.isSafeInteger(sprite.height) || sprite.height < 1) throw new Error(`Sprite ${index + 1}の画像寸法が不正です。`);
+      if (!Number.isSafeInteger(sprite.offsetX) || !Number.isSafeInteger(sprite.offsetY) || typeof sprite.extracted !== 'boolean') throw new Error(`Sprite ${index + 1}の配置属性が不正です。`);
+      const tags = normalizeTags(sprite.tags), animation = animationProperties(sprite);
+      return { name: sprite.name, source: sprite.source, image: sprite.image, width: sprite.width, height: sprite.height,
+        tags, offsetX: sprite.offsetX, offsetY: sprite.offsetY, extracted: sprite.extracted, ...animation };
+    });
+    const names = new Set(); for (const sprite of sprites) { if (names.has(sprite.name)) throw new Error('Project内のSprite名が重複しています。'); names.add(sprite.name); }
+    const animationErrors = validateAnimations(sprites, groups); if (animationErrors.length) throw new Error(animationErrors.join(' '));
+    return { settings, sprites, groups };
   }
   function durationMs(durationFrames, fps) {
     validateFps(fps);
@@ -274,6 +364,7 @@
   const api = { DEFAULTS, LIMITS, ALIGNMENTS, validateSettings, restoreSettings, analyzeAlpha, alphaBounds,
     addMargin, fitScale, uniformScale, align, nextPowerOfTwo, layout, cellPosition, makePlan, metadata,
     uniqueName, localDate, nextSequence, basename, detectIslands, cropIsland, alphaAnchor,
+    normalizeTags, validateGrid, validateAddition, inferGrid, validateProject,
     ANIMATION_DEFAULTS, animationProperties, validateFps, validateAnimations, durationMs, buildAnimations, animationFrameAt };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.AtlasCore = Object.freeze(api);

@@ -6,11 +6,12 @@
   const form = $('settingsForm');
   const SETTINGS_KEY = 'sprite-atlas.settings.v1', SEQUENCE_KEY = 'sprite-atlas.sequence.v1';
   // imageは描画用ソース。将来のレイヤー合成もこの境界で用意し、配置計算には持ち込まない。
-  /** @typedef {{id:number,source:string,name:string,width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null,offsetX:number,offsetY:number,groupId:string,animationOrder:number,durationFrames:number,extracted?:boolean,anchor?:object|null}} SourceItem */
+  /** @typedef {{id:number,source:string,name:string,tags:string[],width:number,height:number,image:ImageBitmap|null,url:string|null,analysis:object|null,thumb:string,error:string,trim:object|null,bounds:object|null,offsetX:number,offsetY:number,groupId:string,animationOrder:number,durationFrames:number,extracted?:boolean,anchor?:object|null,tagError?:string}} SourceItem */
   const state = { settings: { ...C.DEFAULTS }, items: [], nextId: 1, busy: false, saving: false,
     selectedItemId: null, groups: new Map(), plan: null, validItems: [], pending: null, totalPixels: 0, sequence: null,
     timer: null, queue: Promise.resolve(), storageWarning: false };
   const playback = { raf: null, playing: false, start: 0, groupId: '', animation: null, frameIndex: -1 };
+  let gridSource = null, projectUrl = null;
 
   function message(text, kind = 'info') {
     $('notice').textContent = text; $('notice').className = `notice ${kind}`; $('notice').hidden = !text;
@@ -50,6 +51,13 @@
     $('clearImages').disabled = !state.items.length || state.busy || state.saving;
     $('pickFiles').disabled = state.saving;
     $('splitFiles').disabled = state.saving || state.busy;
+    $('pickGrid').disabled = state.saving || state.busy;
+    $('addGrid').disabled = !gridSource || state.saving || state.busy;
+    $('prepareProject').disabled = !state.items.length || state.saving || state.busy;
+    $('loadProject').disabled = state.saving || state.busy;
+    const transformDisabled = !selectedItem() || state.busy || state.saving;
+    $('flipHorizontalCopy').disabled = transformDisabled;
+    $('flipVerticalCopy').disabled = transformDisabled;
     $('exportButton').textContent = state.saving ? '書き出し中…' : 'PNG + JSON を用意';
   }
   function currentSequence(date) {
@@ -76,6 +84,10 @@
       : '各画像がセル内で最大になるよう個別に拡大・縮小します。アイコンやアイテム向け。';
     const errors = C.validateSettings(state.settings);
     errors.push(...C.validateAnimations(state.items, state.groups));
+    for (const item of state.items) {
+      try { C.normalizeTags(item.tags); } catch (error) { errors.push(`${item.name}: ${error.message}`); }
+      if (item.tagError) errors.push(`${item.name}: ${item.tagError}`);
+    }
     state.validItems = [];
     if (!errors.length) {
       for (const item of state.items) {
@@ -167,6 +179,7 @@
     if (!item) { $('selectedCanvas').width = 1; $('selectedCanvas').height = 1; refreshAnimation(); return; }
     if (syncFields) {
       $('spriteName').value = item.name;
+      $('spriteTags').value = item.tags.join(', '); $('spriteTags').setCustomValidity(item.tagError || '');
       for (const key of ['offsetX', 'offsetY']) { $(key).value = item[key]; $(key).setCustomValidity(''); }
       for (const key of ['groupId', 'animationOrder', 'durationFrames']) $(key).value = item[key];
     }
@@ -221,6 +234,63 @@
     if (item.image) { item.image.close(); state.totalPixels -= item.width * item.height; }
     item.image = null; item.analysis = null;
   }
+  function closeTemporaryItems(items) {
+    for (const item of items) { if (item.url) URL.revokeObjectURL(item.url); if (item.image) item.image.close(); item.image = null; }
+  }
+  function thumbnail(image, width, height) {
+    const ratio = Math.min(60 / width, 60 / height, 1), canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * ratio)); canvas.height = Math.max(1, Math.round(height * ratio));
+    const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('thumbnail用Canvasを作成できません。');
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const result = canvas.toDataURL('image/png'); canvas.width = 1; canvas.height = 1; return result;
+  }
+  async function itemFromPixels(pixels, width, height, values) {
+    const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height; let image;
+    try {
+      const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('画像生成用Canvasを作成できません。');
+      ctx.putImageData(new ImageData(pixels, width, height), 0, 0); image = await createImageBitmap(canvas);
+      const item = { ...values, width, height, image, url: null,
+        analysis: C.analyzeAlpha(pixels, width, height), thumb: '', error: '', trim: null, bounds: null };
+      item.thumb = thumbnail(image, width, height); return item;
+    } catch (error) { if (image) image.close(); throw error; }
+    finally { canvas.width = 1; canvas.height = 1; }
+  }
+  async function copyFlippedItem(item, horizontal) {
+    if (!item?.image || state.busy || state.saving) return;
+    const pixels = item.width * item.height;
+    if (state.items.length >= C.LIMITS.maxImages) { message(`画像の上限${C.LIMITS.maxImages}枚を超えるため複製できません。`, 'error'); return; }
+    if (state.totalPixels + pixels > C.LIMITS.maxTotalSourcePixels) { message('複製後の読み込み済み画像合計が96M画素を超えるため追加できません。', 'error'); return; }
+    state.busy = true; updateButtons();
+    let canvas, copy;
+    try {
+      canvas = document.createElement('canvas'); canvas.width = item.width; canvas.height = item.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('反転用Canvasを作成できません。');
+      ctx.save();
+      if (horizontal) { ctx.translate(item.width, 0); ctx.scale(-1, 1); }
+      else { ctx.translate(0, item.height); ctx.scale(1, -1); }
+      ctx.drawImage(item.image, 0, 0); ctx.restore();
+      const imageData = ctx.getImageData(0, 0, item.width, item.height);
+      const suffix = horizontal ? '_flipH' : '_flipV';
+      copy = {
+        id: state.nextId++, source: item.source,
+        name: C.uniqueName(`${item.name}${suffix}`, new Set(state.items.map(i => i.name))),
+        width: item.width, height: item.height, image: await createImageBitmap(canvas), url: null,
+        analysis: C.analyzeAlpha(imageData.data, item.width, item.height), thumb: '', error: '', trim: null, bounds: null,
+        tags: [...item.tags], offsetX: item.offsetX, offsetY: item.offsetY, extracted: !!item.extracted, anchor: null, ...C.ANIMATION_DEFAULTS
+      };
+      copy.thumb = thumbnail(copy.image, copy.width, copy.height);
+      state.totalPixels += pixels;
+      const position = state.items.indexOf(item); state.items.splice(position + 1, 0, copy); state.selectedItemId = copy.id;
+      message(`${item.name} を${horizontal ? '左右' : '上下'}反転して ${copy.name} として複製しました。`);
+    } catch (error) {
+      if (copy?.image) copy.image.close();
+      message(`反転コピーに失敗しました: ${error.message}`, 'error');
+    } finally {
+      if (canvas) { canvas.width = 1; canvas.height = 1; }
+      state.busy = false; rebuild();
+    }
+  }
   async function decodeItem(file, item) {
     let image, bitmap, scratch;
     try {
@@ -238,9 +308,7 @@
       if (!ctx) throw new Error('画像解析用Canvasを作成できません。');
       ctx.drawImage(bitmap, 0, 0);
       item.analysis = C.analyzeAlpha(ctx.getImageData(0, 0, item.width, item.height).data, item.width, item.height);
-      const ratio = Math.min(60 / item.width, 60 / item.height, 1);
-      scratch.width = Math.max(1, Math.round(item.width * ratio)); scratch.height = Math.max(1, Math.round(item.height * ratio));
-      ctx.drawImage(bitmap, 0, 0, scratch.width, scratch.height); item.thumb = scratch.toDataURL('image/png');
+      item.thumb = thumbnail(bitmap, item.width, item.height);
       item.image = bitmap; state.totalPixels += pixels; item.error = '';
     } catch (error) {
       item.analysis = null; item.error = `読込失敗：${error.message || '画像形式を確認してください。'}`;
@@ -260,7 +328,7 @@
         if (state.items.length >= C.LIMITS.maxImages) { skipped++; continue; }
         const source = file.name || `clipboard_${state.nextId}.png`;
         const item = { id: state.nextId++, source, name: C.uniqueName(source.replace(/\.[^.]+$/, ''), new Set(state.items.map(i => i.name))),
-          width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null, offsetX: 0, offsetY: 0, ...C.ANIMATION_DEFAULTS };
+          tags: [], width: 0, height: 0, image: null, url: null, analysis: null, thumb: '', error: '読み込み中…', trim: null, bounds: null, offsetX: 0, offsetY: 0, ...C.ANIMATION_DEFAULTS };
         state.items.push(item); message(`画像を読み込み中… ${++added} / ${files.length}`);
         await decodeItem(file, item);
         // 大量読込でも定期的に画面と入力処理に制御を返す。
@@ -296,20 +364,154 @@
       for (const [index, island] of detection.islands.entries()) {
         const { width, height } = island.bounds;
         const pixels = C.cropIsland(data, original.width, detection, island);
-        scratch.width = width; scratch.height = height;
-        ctx.putImageData(new ImageData(pixels, width, height), 0, 0);
         const name = C.uniqueName(`${file.name.replace(/\.[^.]+$/, '')}_${String(index + 1).padStart(2, '0')}`, used); used.add(name);
-        const item = { id: state.nextId++, source: file.name, name, width, height, image: await createImageBitmap(scratch),
-          analysis: C.analyzeAlpha(pixels, width, height), extracted: true, offsetX: 0, offsetY: 0, error: '', url: null, ...C.ANIMATION_DEFAULTS };
+        const item = await itemFromPixels(pixels, width, height, { id: state.nextId++, source: file.name, name,
+          tags: [], extracted: true, offsetX: 0, offsetY: 0, anchor: null, ...C.ANIMATION_DEFAULTS });
         state.totalPixels += width * height; added.push(item);
-        const ratio = Math.min(60 / width, 60 / height, 1);
-        scratch.width = Math.max(1, Math.round(width * ratio)); scratch.height = Math.max(1, Math.round(height * ratio));
-        ctx.drawImage(item.image, 0, 0, scratch.width, scratch.height); item.thumb = scratch.toDataURL('image/png');
       }
       state.items.push(...added);
       message(`${file.name}: ${added.length}キャラクターを検出・追加しました（ノイズ${detection.discardedCount}島を除外、最小${settings.minIslandPixels}画素）。${added.length ? '' : 'しきい値や島の最小画素数を確認してください。'}`, added.length ? 'info' : 'warning');
     } catch (error) { added.forEach(disposeItem); message(`分割追加できません：${error.message}`, 'error'); }
     finally { disposeItem(original); if (scratch) { scratch.width = 1; scratch.height = 1; } state.busy = false; rebuild(); }
+  }
+  function gridValues() {
+    return C.validateGrid({ imageWidth: gridSource?.width, imageHeight: gridSource?.height,
+      cellWidth: Number($('gridCellWidth').value), cellHeight: Number($('gridCellHeight').value),
+      columns: Number($('gridColumns').value), rows: Number($('gridRows').value) });
+  }
+  function occupiedGridCells(grid) {
+    const occupied = [];
+    for (let row = 0; row < grid.rows; row++) for (let column = 0; column < grid.columns; column++) {
+      let found = false;
+      for (let y = 0; y < grid.cellHeight && !found; y++) for (let x = 0; x < grid.cellWidth; x++) {
+        const sourceX = column * grid.cellWidth + x, sourceY = row * grid.cellHeight + y;
+        if (gridSource.data[(sourceY * grid.imageWidth + sourceX) * 4 + 3]) { found = true; break; }
+      }
+      if (found) occupied.push({ row, column });
+    }
+    return occupied;
+  }
+  function updateGridSummary() {
+    if (!gridSource) { $('gridSummary').textContent = 'Atlas画像を選択すると、推定値とセル数を表示します。'; return; }
+    try {
+      const grid = gridValues(), occupied = occupiedGridCells(grid);
+      $('gridSummary').textContent = `画像 ${grid.imageWidth} × ${grid.imageHeight}px · Cell ${grid.cellWidth} × ${grid.cellHeight}px · ${grid.columns}列 × ${grid.rows}行 · 全${grid.cells}セル · 非透明${occupied.length}セル`;
+      $('gridValidation').hidden = true; $('gridValidation').textContent = '';
+    } catch (error) {
+      $('gridSummary').textContent = `画像 ${gridSource.width} × ${gridSource.height}px`;
+      $('gridValidation').textContent = error.message; $('gridValidation').hidden = false;
+    }
+  }
+  async function selectGridSource(file) {
+    if (!file || state.busy || state.saving) return;
+    state.busy = true; updateButtons(); let bitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+      if (!bitmap.width || !bitmap.height || bitmap.width > C.LIMITS.maxGridSide || bitmap.height > C.LIMITS.maxGridSide) throw new Error(`Grid Atlasは各辺${C.LIMITS.maxGridSide}px以下にしてください。`);
+      const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) throw new Error('Grid解析用Canvasを作成できません。');
+      ctx.drawImage(bitmap, 0, 0); const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      const inferred = C.inferGrid(data, bitmap.width, bitmap.height);
+      if (gridSource?.image) gridSource.image.close();
+      gridSource = { file, name: file.name || 'atlas.png', image: bitmap, data, width: bitmap.width, height: bitmap.height }; bitmap = null;
+      $('gridColumns').value = inferred.columns; $('gridRows').value = inferred.rows;
+      $('gridCellWidth').value = inferred.cellWidth; $('gridCellHeight').value = inferred.cellHeight;
+      $('gridInference').textContent = inferred.confidence === 'suggested' ? '透明境界からの推定値です。分割前に確認してください。' : 'Gridを一意に推定できませんでした。列・行・Cell寸法を入力してください。';
+      updateGridSummary(); message(`${gridSource.name}をGrid分割用に読み込みました。推定値を確認してください。`);
+    } catch (error) { if (bitmap) bitmap.close(); message(`Grid Atlasを読み込めません：${error.message}`, 'error'); }
+    finally { state.busy = false; updateButtons(); }
+  }
+  async function importGrid() {
+    if (!gridSource || state.busy || state.saving) return;
+    state.busy = true; updateButtons(); const added = [];
+    try {
+      const grid = gridValues(), occupied = occupiedGridCells(grid);
+      const addedPixels = occupied.length * grid.cellWidth * grid.cellHeight;
+      C.validateAddition(state.items.length, state.totalPixels, occupied.length, addedPixels);
+      const used = new Set(state.items.map(item => item.name)), base = gridSource.name.replace(/\.[^.]+$/, '') || 'atlas';
+      for (const cell of occupied) {
+        const pixels = new Uint8ClampedArray(grid.cellWidth * grid.cellHeight * 4);
+        for (let y = 0; y < grid.cellHeight; y++) {
+          const start = ((cell.row * grid.cellHeight + y) * grid.imageWidth + cell.column * grid.cellWidth) * 4;
+          pixels.set(gridSource.data.subarray(start, start + grid.cellWidth * 4), y * grid.cellWidth * 4);
+        }
+        const proposed = `${base}_r${String(cell.row + 1).padStart(2, '0')}_c${String(cell.column + 1).padStart(2, '0')}`;
+        const name = C.uniqueName(proposed, used); used.add(name);
+        added.push(await itemFromPixels(pixels, grid.cellWidth, grid.cellHeight, { id: state.nextId + added.length,
+          source: gridSource.name, name, tags: [], offsetX: 0, offsetY: 0, extracted: false, anchor: null, ...C.ANIMATION_DEFAULTS }));
+      }
+      state.nextId += added.length; state.items.push(...added); state.totalPixels += addedPixels;
+      if (added.length) state.selectedItemId = added[0].id;
+      message(`${gridSource.name}: 全${grid.cells}セルから非透明${added.length} Spriteを追加しました。${grid.cells - added.length}個の透明セルは除外しました。`, added.length ? 'info' : 'warning');
+    } catch (error) { closeTemporaryItems(added); message(`Grid分割追加できません：${error.message}`, 'error'); }
+    finally { state.busy = false; rebuild(); }
+  }
+  function itemPngDataUrl(item) {
+    const canvas = document.createElement('canvas'); canvas.width = item.width; canvas.height = item.height;
+    const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Project画像用Canvasを作成できません。');
+    ctx.drawImage(item.image, 0, 0); const result = canvas.toDataURL('image/png'); canvas.width = 1; canvas.height = 1; return result;
+  }
+  function projectSnapshot() {
+    return { format: 'sprite-atlas-project', version: 1, settings: { ...state.settings },
+      groups: Array.from(state.groups, ([id, group]) => ({ id, fps: group.fps })),
+      sprites: state.items.map(item => ({ name: item.name, source: item.source, tags: [...item.tags], width: item.width, height: item.height,
+        image: itemPngDataUrl(item), offsetX: item.offsetX, offsetY: item.offsetY, extracted: !!item.extracted,
+        groupId: item.groupId, animationOrder: item.animationOrder, durationFrames: item.durationFrames })) };
+  }
+  async function prepareProjectDownload() {
+    if (!state.items.length || state.busy || state.saving) return;
+    rebuild(); if ($('validation').hidden === false) { message('Project保存前に入力エラーを修正してください。', 'error'); return; }
+    state.saving = true; updateButtons();
+    try {
+      const project = projectSnapshot(); C.validateProject(project);
+      if (projectUrl) URL.revokeObjectURL(projectUrl);
+      projectUrl = URL.createObjectURL(new Blob([JSON.stringify(project, null, 2) + '\n'], { type: 'application/json' }));
+      $('saveProjectLink').href = projectUrl; $('saveProjectLink').download = `sprite-atlas-${C.localDate()}.satlas.json`; $('saveProjectLink').hidden = false;
+      message('編集Projectを用意しました。Project保存リンクから保存してください。Runtime連番は変更していません。');
+    } catch (error) { message(`Projectを保存できません：${error.message}`, 'error'); }
+    finally { state.saving = false; updateButtons(); }
+  }
+  async function decodeProjectItem(sprite, id) {
+    let bitmap;
+    try {
+      const response = await fetch(sprite.image); if (!response.ok) throw new Error('埋め込み画像を読み取れません。');
+      bitmap = await createImageBitmap(await response.blob());
+      if (bitmap.width !== sprite.width || bitmap.height !== sprite.height) throw new Error('埋め込み画像の寸法がProject記録と一致しません。');
+      const pixels = bitmap.width * bitmap.height;
+      if (!pixels || bitmap.width > 16384 || bitmap.height > 16384 || pixels > C.LIMITS.maxSourcePixels) throw new Error('埋め込み画像が入力上限を超えています。');
+      const canvas = document.createElement('canvas'); canvas.width = bitmap.width; canvas.height = bitmap.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) throw new Error('Project画像解析用Canvasを作成できません。');
+      ctx.drawImage(bitmap, 0, 0); const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+      return { id, source: sprite.source, name: sprite.name, tags: [...sprite.tags], width: bitmap.width, height: bitmap.height,
+        image: bitmap, url: null, analysis: C.analyzeAlpha(data, bitmap.width, bitmap.height), thumb: thumbnail(bitmap, bitmap.width, bitmap.height),
+        error: '', trim: null, bounds: null, offsetX: sprite.offsetX, offsetY: sprite.offsetY, extracted: sprite.extracted, anchor: null,
+        groupId: sprite.groupId, animationOrder: sprite.animationOrder, durationFrames: sprite.durationFrames };
+    } catch (error) { if (bitmap) bitmap.close(); throw error; }
+  }
+  async function loadProjectFile(file) {
+    if (!file || state.busy || state.saving) return;
+    state.busy = true; updateButtons(); const temporary = [];
+    try {
+      let parsed; try { parsed = JSON.parse(await file.text()); } catch { throw new Error('Project JSONを解析できません。'); }
+      const project = C.validateProject(parsed);
+      const declaredPixels = project.sprites.reduce((sum, sprite) => sum + sprite.width * sprite.height, 0);
+      if (!Number.isSafeInteger(declaredPixels) || declaredPixels > C.LIMITS.maxTotalSourcePixels) throw new Error('Projectの画像合計が96M画素を超えます。');
+      for (let index = 0; index < project.sprites.length; index++) temporary.push(await decodeProjectItem(project.sprites[index], index + 1));
+      const actualPixels = temporary.reduce((sum, item) => sum + item.width * item.height, 0);
+      if (actualPixels !== declaredPixels) throw new Error('Project画像の合計画素数が一致しません。');
+      for (const item of temporary) {
+        item.bounds = C.alphaBounds(item.analysis, project.settings.threshold);
+        if (!item.bounds) throw new Error(`${item.name}: 現在のalphaしきい値で有効画素がありません。`);
+        if (item.extracted) item.anchor = C.alphaAnchor(item.analysis, project.settings.threshold);
+        item.trim = C.addMargin(item.bounds, project.settings.margin);
+      }
+      const plan = C.makePlan(temporary, project.settings); C.buildAnimations(plan.sprites, project.groups);
+      cancelPlayback(); playback.playing = false; clearPending();
+      state.items.forEach(disposeItem); state.items = temporary.splice(0); state.totalPixels = actualPixels;
+      state.settings = { ...project.settings }; state.groups = new Map(project.groups); state.nextId = state.items.length + 1; state.selectedItemId = state.items[0]?.id ?? null;
+      populateSettings(); rebuild(); message(`${file.name}: ${state.items.length} Spriteの編集Projectを読み込みました。`);
+    } catch (error) { closeTemporaryItems(temporary); message(`Projectを読み込めません：${error.message} 現在の編集内容は維持しました。`, 'error'); }
+    finally { state.busy = false; rebuild(); }
   }
   function clearPending() {
     if (state.pending) { URL.revokeObjectURL(state.pending.pngUrl); URL.revokeObjectURL(state.pending.jsonUrl); }
@@ -358,6 +560,13 @@
     const settings = { ...state.settings };
     state.queue = state.queue.then(() => importSplit(file, settings));
   });
+  $('pickGrid').addEventListener('click', () => $('gridInput').click());
+  $('gridInput').addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) state.queue = state.queue.then(() => selectGridSource(file)); });
+  for (const id of ['gridCellWidth', 'gridCellHeight', 'gridColumns', 'gridRows']) $(id).addEventListener('input', updateGridSummary);
+  $('addGrid').addEventListener('click', () => { state.queue = state.queue.then(importGrid); });
+  $('prepareProject').addEventListener('click', prepareProjectDownload);
+  $('loadProject').addEventListener('click', () => $('projectInput').click());
+  $('projectInput').addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) state.queue = state.queue.then(() => loadProjectFile(file)); });
   let dragDepth = 0;
   window.addEventListener('dragenter', event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dragDepth++; $('dropZone').classList.add('dragging'); } });
   window.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
@@ -372,6 +581,8 @@
   $('playAnimation').addEventListener('click', () => { if (!playback.animation) return; playback.playing = true; refreshAnimation(); });
   $('stopAnimation').addEventListener('click', () => { playback.playing = false; refreshAnimation(); });
   $('loopAnimation').addEventListener('change', refreshAnimation);
+  $('flipHorizontalCopy').addEventListener('click', () => copyFlippedItem(selectedItem(), true));
+  $('flipVerticalCopy').addEventListener('click', () => copyFlippedItem(selectedItem(), false));
   $('spriteName').addEventListener('change', event => {
     const item = selectedItem(); if (!item) return;
     item.name = C.uniqueName(event.target.value, new Set(state.items.filter(i => i !== item).map(i => i.name))); rebuild();
@@ -379,6 +590,11 @@
   $('spriteForm').addEventListener('input', event => {
     const key = event.target.dataset.action, item = selectedItem();
     const id = event.target.id;
+    if (item && id === 'spriteTags') {
+      try { item.tags = C.normalizeTags(event.target.value); item.tagError = ''; event.target.setCustomValidity(''); }
+      catch (error) { item.tagError = error.message; event.target.setCustomValidity(error.message); }
+      rebuild(false); return;
+    }
     if (item && ['groupId', 'animationOrder', 'durationFrames', 'groupFps'].includes(id)) {
       if (id === 'groupId') {
         item.groupId = event.target.value.trim();
@@ -428,7 +644,10 @@
   });
   $('cancelDownloads').addEventListener('click', () => { clearPending(); message('書き出しデータを閉じました。連番は進めていません。保存済みの場合は次回の同名ファイルにご注意ください。', 'warning'); });
   window.addEventListener('beforeunload', event => { if (state.pending || state.saving || state.busy) { event.preventDefault(); event.returnValue = ''; } });
-  window.addEventListener('pagehide', event => { cancelPlayback(); playback.playing = false; if (!event.persisted) { state.items.forEach(disposeItem); clearPending(); } });
+  window.addEventListener('pagehide', event => { cancelPlayback(); playback.playing = false; if (!event.persisted) {
+    state.items.forEach(disposeItem); clearPending(); if (gridSource?.image) gridSource.image.close(); gridSource = null;
+    if (projectUrl) URL.revokeObjectURL(projectUrl); projectUrl = null;
+  } });
   window.addEventListener('focus', updateFilename); window.addEventListener('storage', updateFilename);
   state.settings = C.restoreSettings(readStorage(SETTINGS_KEY)); state.sequence = readStorage(SEQUENCE_KEY);
   populateSettings(); rebuild();

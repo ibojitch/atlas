@@ -8,6 +8,13 @@
   --border:#dbe3e6;
   --muted:#64747d
 }
+
+.transform-copy-row { margin-top: 8px; }
+.transform-copy-row button { flex: 1 1 120px; }
+.grid-summary { margin-top: 10px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.field-error { margin-top: 8px; color: var(--danger); font-size: 12px; line-height: 1.5; }
+.project-panel { padding: 14px 0; border: 0; box-shadow: none; }
+.project-panel .button-row > * { flex: 1 1 110px; text-align: center; }
 *{
   box-sizing:border-box
 }

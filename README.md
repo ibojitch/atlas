@@ -14,7 +14,7 @@ Chrome / Edgeの現行デスクトップ版を主対象にしています。file
 
 1. 複数画像を画面へドロップするか、「画像を選択」で追加します。画像をコピーしてCtrl+V / ⌘+Vで貼り付けることもできます。
 2. セル幅・高さ、列数、トリミング、スケーリング方式を設定します。
-3. 中央の一覧でSpriteを選び、右Inspectorで名前・XY補正を編集します。一覧の↑ / ↓ ボタンはAtlas順を変更します。
+3. 中央の一覧でSpriteを選び、右Inspectorで名前・Tags・XY補正を編集します。一覧の↑ / ↓ ボタンはAtlas順を変更します。
 4. プレビューのサイズと配置を確認します。表示倍率とセル境界は出力画像に影響しません。
 5. 「PNG + JSON を用意」を押します。
 6. 「PNG を保存」「JSON を保存」から両方のファイルを保存します。
@@ -22,7 +22,7 @@ Chrome / Edgeの現行デスクトップ版を主対象にしています。file
 
 読込失敗、完全透明、しきい値を超える画素がない画像は赤く表示され、出力から除外されます。正常な画像の読み込みや出力は継続します。一覧のindexは**出力される画像だけの0始まりの連番**で、エラー画像は「—」です。
 
-「すべて削除」は画像一覧を空にします。入力ファイルそのものは変更しません。画像は再起動後には復元されません。
+「すべて削除」は画像一覧を空にします。入力ファイルそのものは変更しません。ブラウザ再起動後も編集を続ける場合は、左ペインの「編集Project」からProjectファイルを保存してください。
 
 ## 3ペインとSprite Inspector
 
@@ -45,7 +45,7 @@ FHD以上では画面高に合わせた3ペイン構成です。左292pxに出�
 
 Group IDは前後をtrimし、空欄・空白のみは未所属です。大文字小文字は区別します。内部はMap、出力辞書はObject.create(null)を用い、`__proto__`、`constructor`等も使えます。不正なOrder・Duration・FPSはエラー表示し、出力・再生を止めます。有効画素のないSpriteは従来どおりAtlasから除外され、そのSpriteのAnimationフレームも出力しません。
 
-編集中の設定はプレビューへ即時反映します。再生中にoffset・FPS・Order・Duration等を変更すると更新後のGroupを先頭から再生し直します。別Groupの選択では停止します。画像・Animation設定は再起動時には復元されません。
+編集中の設定はプレビューへ即時反映します。再生中にoffset・FPS・Order・Duration等を変更すると更新後のGroupを先頭から再生し直します。別Groupの選択では停止します。画像・Animation設定はlocalStorageからは復元されませんが、Project SAVE / LOADで復元できます。
 
 ### JSON version 2のAnimation定義
 
@@ -65,7 +65,7 @@ Group IDは前後をtrimし、空欄・空白のみは未所属です。大文�
 
 これはJSON内のanimations部分の例です。`frames[].sprite` は **出力Atlasのsprites配列のindex**、`duration` はDuration Framesでありミリ秒ではありません。未所属SpriteやメンバーのいないGroupは含みません。出力準備時にGroup設定もスナップショットするため、その後の編集で準備済みPNG/JSONの内容は変わりません。
 
-既知の制約：1 Spriteにつき所属Groupは1つです。Timeline、Tween、補間Animation、骨・IK、イベント、音声同期、レイヤー合成、複数Atlas、Animation定義の再読込はありません。次の拡張としてプロジェクト保存/復元やフレーム送りを追加しやすい責務分離を維持しています。
+既知の制約：1 Spriteにつき所属Groupは1つです。Timeline、Tween、補間Animation、骨・IK、イベント、音声同期、レイヤー合成、複数Atlas、Runtime JSONからのAnimation再読込はありません。編集再開にはRuntime JSONではなくProjectファイルを使います。
 
 ## 各設定
 
@@ -162,6 +162,7 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
     "index": 0,
     "name": "idle",
     "source": "idle.png",
+    "tags": ["character:purple", "motion:idle"],
     "x": 0,
     "y": 0,
     "width": 128,
@@ -212,9 +213,43 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 
 抽出画像も既存のSprite Item・`makePlan()`・描画・PNG/JSON出力を共有します。JSONの各spriteに `offsetX` / `offsetY`、抽出画像には `anchor` と `placement: "centroid-bottom"` を追加しています。抽出画像のbounds・anchor座標は切り出した画像内の座標です。描画ソースの準備はapp側、配置計算はcore側、描画はrenderer側に分離したままで、将来の合成済み描画ソースにも拡張可能です。
 
+## Grid Sprite Atlasの分割追加
+
+「Sprite Atlasを分割して追加」では、配置済みAtlasを矩形セル単位で切り出します。画像を選ぶと画像寸法、Cell幅・高さ、列・行、全セル数、非透明セル数を表示します。推定したGrid値は候補にすぎないため、分割前に手動で修正できます。完全透明セルは既定で除外し、非透明セルだけを通常Spriteと同じ`state.items`へ一括追加します。途中まで追加することはありません。
+
+推定はX/Y方向のalpha占有区間と画像寸法の割り切れを使う保守的な補助です。一意に扱えない画像では1×1を提示して手動入力を促します。Sprite内部の透明な切れ目をセル境界と誤認する可能性があるため、必ずSummaryを確認してください。1280×684px、160×228px、8列×3行、全24セル中17セル有効（最下段は左端のみ）の形式も扱えます。
+
+Grid専用上限は画像各辺4096px、64列、64行、全512セルです。さらに追加後のSprite数500件と、全入力画像合計96Mi画素の共通上限を満たす必要があります。上限・寸法不一致・復号失敗時は全体を中止します。
+
+## 反転コピーとTags
+
+Inspectorの「左右反転コピー」「上下反転コピー」は、選択Spriteの実画素を反転した別Spriteを元Sprite直後へ追加します。名前には`_flipH` / `_flipV`を付け、重複時は連番化します。offsetとTagsを引き継ぎ、Animation Group・Order・Durationは初期値へ戻します。通常追加、島分割、Grid分割、Project LOADのどのSpriteにも同じ処理を使用できます。
+
+Tagsはカンマ区切りで入力します。前後空白と空要素を除き、完全一致の重複を除外します。大文字小文字は区別し、`character:purple`のような記号付きtagも使用できます。1 Sprite最大32個、1 tag最大64文字です。超過は切り捨てずvalidation errorにします。TagsはProjectとRuntime JSONの各spriteに保存されます。
+
+## 編集Project SAVE / LOAD
+
+編集ProjectはRuntime用PNG + JSONとは別機能です。「Projectを用意」で`.satlas.json`の保存リンクを作り、「ProjectをLOAD」で編集状態を復元します。Project SAVEはRuntime書き出し連番を進めず、Runtimeのpending downloadとも分離されています。
+
+Project形式はJSONベースで、識別子と独立したversionを持ちます。
+
+```json
+{
+  "format": "sprite-atlas-project",
+  "version": 1,
+  "settings": {},
+  "groups": [],
+  "sprites": []
+}
+```
+
+保存対象は出力設定、Sprite順、PNG Data URLとして埋め込んだ各Sprite画像、name、source、Tags、offset、抽出配置方式、Animation属性、Group FPSです。ImageBitmap、Object URL、analysis、bounds、trim、thumbnail、選択状態、再生状態、現在フレーム、zoom、pending download、ファイル連番は保存しません。LOAD時に画像を再デコードし、解析・thumbnail・bounds・trim・anchorを現在のロジックで再生成します。
+
+LOADはatomicです。JSON、format/version、settings、Tags、Animation、Group FPS、画像、Sprite数、画素数を一時領域ですべて検証し、全画像の復号に成功してから現在の編集stateを入れ替えます。途中で失敗した場合は現在のProjectを維持し、一時ImageBitmapも破棄します。
+
 ## 設定保存
 
-設定キーは`sprite-atlas.settings.v1`、連番キーは`sprite-atlas.sequence.v1`です。全ての出力設定と島の最小画素数を保存し、不正な型・値は初期値に戻します。組み合わせが不正な場合も初期値に戻します。画像、各スプライトのXY補正・Animation属性、Group FPS、選択状態、再生状態、プレビュー倍率、セル境界の表示状態は保存しません。Animation定義は書き出したJSONに含まれますが、そのJSONの再読み込みは未対応です。
+設定キーは`sprite-atlas.settings.v1`、連番キーは`sprite-atlas.sequence.v1`です。localStorageには全出力設定と島の最小画素数を保存し、不正な型・値は初期値に戻します。画像、各SpriteのTags・XY補正・Animation属性、Group FPSはlocalStorageへ保存しません。これらを含む編集状態の再開にはProject SAVE / LOADを使用します。Runtime JSONの再読み込みには対応していません。
 
 ## File System Access API
 
@@ -225,6 +260,7 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 ## 上限と既知の制限
 
 - 最大500画像。各入力画像は各辺16384px以下・33,554,432画素（32Mi画素）以下。
+- Grid Atlasは各辺4096px以下、最大64列×64行、全512セル以下。列・行をそれぞれ満たしても全セル上限を超えるGridは拒否します。
 - 読み込み済み画像は合計100,663,296画素（96Mi画素）以下。
 - 出力Canvasは各辺8192px以下・33,554,432画素以下。利用端末によってはこれより小さくてもメモリ不足になります。
 - 元画像をImageBitmapとして保持します。alphaの256段階の外接矩形だけをキャッシュし、フルサイズのImageDataや解析用Canvasは保持しません。しきい値変更時の再デコードも行いません。
@@ -235,15 +271,15 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 - 色管理やSmooth補間の細部はブラウザに依存します。ICCプロファイル等の元画像メタデータは保持しません。
 - ダウンロード後のディスク書き込み失敗、保存取消、名前変更をアプリから自動検知することはできません。
 - 複数画像の読み込みは順番に実行します。ファイル一覧の並びはブラウザから受け取る順番です。任意の順番へ↑ / ↓で変更できます。
-- 取り消し履歴、画像の永続保存、プロジェクトファイル、セルごとのピボット指定はありません。
+- 取り消し履歴、セルごとのピボット指定、ZIPコンテナ形式のProjectはありません。Project v1は画像をPNG Data URLとしてJSONへ埋め込むため、画像数・寸法に応じてファイルが大きくなります。
 
 ## コード構成
 
 - `index.html` — 日本語UIとローカルスクリプト読込。
 - `style.css` — デスクトップ中心のレスポンシブUI、チェッカー、境界オーバーレイ。
-- `atlas-core.js` — DOM非依存のalpha解析、fit、共通倍率、配置、レイアウト、JSON、Animation順序・時間・検証、名前・連番・設定検証。
+- `atlas-core.js` — DOM非依存のalpha解析、Grid・Tags・Project構造検証、fit、共通倍率、配置、レイアウト、JSON、Animation順序・時間・検証、名前・連番・設定検証。
 - `atlas-render.js` — 描画計画をCanvasへ描く処理、最終Atlasのセルを切り出す共通プレビュー、PNG生成。テストでも同じ処理を利用。
-- `app.js` — 明示的な状態オブジェクト、Sprite選択、Inspector、Group共有FPS、経過時間に基づくrequestAnimationFrame再生、入力、画像リソースの解放、設定保存、ダウンロード。
+- `app.js` — 明示的な状態オブジェクト、共通Sprite生成、Grid分割、Project画像serialization/atomic LOAD、Sprite選択、Inspector、Group共有FPS、再生、入力、画像リソース解放、設定保存、ダウンロード。
 - `core-tests.js` — 純粋関数の自動テスト。
 - `tests.html` / `browser-tests.js` — ブラウザ上での計算・PNG画素テスト。
 - `browser-smoke.cjs` — 任意の開発用画面操作テスト。
@@ -252,7 +288,7 @@ PNGは`canvas.toBlob()`で作成します。JSONは同じ描画計画から生�
 
 ### Node不要のブラウザテスト
 
-`tests.html`を直接開くと実行します。49項目について計算とPNG生成を検証します。PNGを再デコードし、全画素の色・透明度をJSONの配置と比較します。Nodeの計算テストは41項目で、3島検出、8近傍、透明0件、ゴミ除外、9島拒否、左右順、重心・下端、重なるbboxのマスク、重心fit、XY補正、設定復元を含みます。
+`tests.html`を直接開くと57項目を実行します。PNGを再デコードして全画素の色・透明度をJSONの配置と比較するほか、Grid境界、Tags正規化、Project構造検証も含みます。Node単独の`core-tests.js`は49項目です。
 
 ### 任意の開発用テスト
 
@@ -278,4 +314,4 @@ node browser-smoke.cjs
 
 終了時にはChrome終了を待ち、作成した一時ディレクトリがOSのtemporary directory直下のatlas-smoke-*であることを確認してから削除します。失敗時やSIGINT/SIGTERMも可能な範囲で後始末します。OSによる強制終了では一時フォルダが残る場合があります。ユーザーの通常Chromeプロファイルは変更しません。スクリーンショットを残す場合だけATLAS_SCREENSHOTに保存先ファイルの絶対パスを指定してください（既存ファイルは上書きします）。既定ではダウンロードしたテストPNG/JSONも一時プロファイルと一緒に削除します。
 
-画面操作40項目で既存の読込・保存・連番・エラー処理・設定復元に加え、FHD3ペイン、Inspector、Group共有FPS、Animation順、プレビュー全画素、offset反映、時間ベースの遷移、非ループ終端、ループ、選択削除を検証します。続けて49項目の計算・Canvas・PNGテストを実行します。Node単独は41項目です。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。
+画面操作60項目で既存の読込・保存・反転コピー・連番・Animation・レスポンシブUIに加え、1280×684のGrid分割、Tags、Project SAVE→LOAD→再SAVE、Atlas画素一致、malformed JSON・version・画像・settings・Tags・Animation・件数・画素上限のatomic LOAD失敗を検証します。続けて57項目の計算・Canvas・PNGテストを実行します。PNG/JSONの実ダウンロードも一時フォルダで確認します。対話的な保存ダイアログやユーザーの保存先で発生するディスクエラーは自動テストの対象外です。

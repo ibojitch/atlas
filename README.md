@@ -4,6 +4,34 @@
 
 HTML / CSS / Vanilla JavaScriptのみで動作します。外部ライブラリ、CDN、サーバー、npm、ビルド作業は不要です。入力画像・画像名・設定を外部に送信しません。
 
+## 2つのワークスペース
+
+画面上部で **Sprite Atlas** と **LINEスタンプ**を切り替えられます。切替は表示するDOMを変更するだけで、Atlasの画像・順番・設定・Inspector・Tags・offset・Animation・Group FPS・Grid追加結果・Project状態と、LINE Projectの状態をそれぞれメモリ上に保持します。切替のためのSAVE→LOADは不要です。
+
+各ワークスペースは独立した未保存状態を持ちます。Projectデータを「用意」しただけでは保存済みになりません。保存リンクを使用し、実際にファイルを保存できたことを確認してから「保存完了を確認」を押すと、そのワークスペースだけが保存済みになります。正常なProject LOAD後も保存済みになります。LOAD失敗時は現在のProjectと未保存状態を維持します。
+
+未保存変更があるProjectのLOAD、新規作成、全削除では確認ダイアログを表示します。キャンセルすると現在の状態を変更しません。ワークスペース切替では確認しません。AtlasまたはLINEのどちらかに未保存変更がある場合や、既存の書き出し準備・保存・読込処理中は、ページ更新やタブを閉じる際にブラウザ標準の離脱確認を使用します。
+
+### LINEスタンプ — Phase 1
+
+LINEワークスペースは現在Phase 1です。Static / Animated、スタンプ予定数、Main Image、Tab Image、Stickerスロットを1つのversion付きProjectとして管理する基盤と、Project SAVE / LOADを提供します。
+
+```json
+{
+  "format": "line-stamp-project",
+  "version": 1,
+  "type": "static",
+  "targetStickerCount": 8,
+  "mainImage": null,
+  "tabImage": null,
+  "stickers": []
+}
+```
+
+Staticは8 / 16 / 24 / 32 / 40個、Animatedは8 / 16 / 24個を選択できます。Mainは240×240px、Tabは96×74px、Static Stickerは最大370×320px、Animated Stickerは最大320×270pxです。1画像1MB以下、Animatedの5～20 frames、loop 1～4、合計4秒以内、1 / 2 / 3 / 4秒、全frame同寸法という基準を将来のvalidation用定数として保持します。
+
+Phase 1では実画像の読込・加工、LINE用trim / resize、Main / Tab自動生成、PNG一括出力、ZIP、APNG解析・生成を行いません。**APNG Exportは未実装**です。外部ライブラリや疑似APNG生成も含めていません。
+
 ## 起動方法
 
 このフォルダの **index.html をChromeまたはEdgeで開いてください**。ファイルをダブルクリックするだけで利用できます。関連ファイルは同じフォルダに置いてください。

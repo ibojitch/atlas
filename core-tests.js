@@ -1,7 +1,10 @@
 /* Node: node core-tests.js / ブラウザ: tests.html */
 (function (root) {
   'use strict';
-  const C = typeof module !== 'undefined' && module.exports ? require('./atlas-core.js') : root.AtlasCore;
+  const node = typeof module !== 'undefined' && module.exports;
+  const C = node ? require('./atlas-core.js') : root.AtlasCore;
+  const L = node ? require('./line-core.js') : root.LineStampCore;
+  const W = node ? require('./workspace-shell.js') : root.WorkspaceShell;
   const tests = [];
   function test(name, run) { tests.push({ name, run }); }
   function equal(actual, expected) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`期待値 ${JSON.stringify(expected)} / 実際 ${JSON.stringify(actual)}`); }
@@ -222,6 +225,28 @@
       const p={format:'sprite-atlas-project',version:2,storageMode:'compact',settings:settings(),groups:[],sprites:[{...sprite}]};change(p);throws(()=>C.validateProject(p));
     }
     equal(C.itemTrim({x:2,y:3,width:10,height:20},8,{sourceScaleX:.25,sourceScaleY:.5}),{x:0,y:-1,width:14,height:28});
+  });
+  test('LINE Static / Animatedの制約と初期Project', () => {
+    equal(L.LIMITS.static.counts,[8,16,24,32,40]); equal(L.LIMITS.animated.counts,[8,16,24]);
+    equal(L.LIMITS.mainImage,{width:240,height:240}); equal(L.LIMITS.tabImage,{width:96,height:74,format:'PNG'});
+    equal(L.LIMITS.maxFileBytes,1048576); equal(L.createProject(),{format:'line-stamp-project',version:1,type:'static',targetStickerCount:8,mainImage:null,tabImage:null,stickers:[]});
+  });
+  test('LINE Project type/count SAVE→LOAD相当のJSON往復', () => {
+    for(const [type,counts] of [['static',[8,16,24,32,40]],['animated',[8,16,24]]]) for(const count of counts) {
+      const project=L.createProject(type,count); equal(L.validateProject(JSON.parse(JSON.stringify(project))),project);
+    }
+    equal(L.changeType(L.createProject('static',40),'animated').targetStickerCount,8);
+  });
+  test('malformed LINE Projectを拒否し入力を変更しない', () => {
+    const current=L.createProject('static',16), signature=JSON.stringify(current);
+    for(const change of [p=>p.format='wrong',p=>p.version=2,p=>p.type='video',p=>p.targetStickerCount=40,p=>p.mainImage={},p=>p.tabImage={},p=>p.stickers=[{}]]) {
+      const broken=JSON.parse(JSON.stringify(L.createProject('animated',8))); change(broken); throws(()=>L.validateProject(broken)); equal(JSON.stringify(current),signature);
+    }
+  });
+  test('workspace dirtyは独立し切替相当のactive変更で維持', () => {
+    const state=W.createState(); W.setDirtyState(state,'atlas',true); state.active='line'; equal([state.atlas.dirty,state.line.dirty,W.hasUnsavedChanges(state)],[true,false,true]);
+    W.setDirtyState(state,'line',true); state.active='atlas'; equal([state.atlas.dirty,state.line.dirty],[true,true]); W.setDirtyState(state,'atlas',false); equal([state.atlas.dirty,state.line.dirty,W.hasUnsavedChanges(state)],[false,true,true]);
+    W.setDirtyState(state,'line',false); equal(W.hasUnsavedChanges(state),false);
   });
   test('経過時間再生の境界・遅延・ループ・非ループ終端', () => {
     const a={fps:60,frames:[{sprite:2,duration:3},{sprite:0,duration:6}]};

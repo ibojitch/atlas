@@ -235,7 +235,28 @@
     for(const [type,counts] of [['static',[8,16,24,32,40]],['animated',[8,16,24]]]) for(const count of counts) {
       const project=L.createProject(type,count); equal(L.validateProject(JSON.parse(JSON.stringify(project))),project);
     }
-    equal(L.changeType(L.createProject('static',40),'animated').targetStickerCount,8);
+    equal(L.changeType(L.createProject('static',40),'animated').targetStickerCount,24);
+  });
+  test('LINE type変更は現在値以下の最大Sticker数へ丸める', () => {
+    for(const [from,to,expected] of [[40,'animated',24],[32,'animated',24],[24,'animated',24],[16,'animated',16],[8,'animated',8],[24,'static',24]]) {
+      const source=L.createProject(to==='static'?'animated':'static',from); equal(L.normalizeStickerCount(to,from),expected); equal(L.changeType(source,to).targetStickerCount,expected);
+    }
+  });
+  test('LINE type変更は元Projectをmutateせず将来データを保持', () => {
+    const mainImage={id:'main'},tabImage={id:'tab'},stickers=[{slot:3,id:'third'}],editing={selectedSlot:3};
+    const source={format:'line-stamp-project',version:1,type:'static',targetStickerCount:40,mainImage,tabImage,stickers,editing,futureField:'keep'};
+    const before={...source},changed=L.changeType(source,'animated');
+    equal(source,before); equal(changed,{...source,type:'animated',targetStickerCount:24});
+    if(changed===source||changed.mainImage!==mainImage||changed.tabImage!==tabImage||changed.stickers!==stickers||changed.editing!==editing)throw new Error('既存Projectデータを保持していません。');
+  });
+  test('LINE仕様定数は共通・Static固有・Animated固有を分離', () => {
+    equal(L.LIMITS.common,{maxFileBytes:1048576,maxZipBytes:62914560,colorMode:'RGB',transparentBackground:true});
+    equal(L.LIMITS.static.sticker,{format:'PNG',maxWidth:370,maxHeight:320,dimensionMultiple:2,minDpi:72,recommendedOuterMarginPx:10});
+    equal(L.LIMITS.animated.sticker,{format:'APNG',maxWidth:320,maxHeight:270,minEitherDimension:270,sameFrameDimensions:true,framesMin:5,framesMax:20,loopsMin:1,loopsMax:4,allowedDurations:[1,2,3,4],totalDurationMax:4,removeFrameMargins:true,removeStaticParts:true,firstFrameUsedAsStill:true});
+    if('dimensionMultiple' in L.LIMITS.animated.sticker||'minDpi' in L.LIMITS.animated.sticker)throw new Error('Static固有制約がAnimatedへ混入しています。');
+  });
+  test('将来Stickerは明示的な1-based slotで安定管理する', () => {
+    equal(L.STICKER_SLOT_POLICY,{strategy:'explicit-slot',field:'slot',firstSlot:1}); equal(L.stickerSlotNumbers(8),[1,2,3,4,5,6,7,8]); throws(()=>L.stickerSlotNumbers(0));
   });
   test('malformed LINE Projectを拒否し入力を変更しない', () => {
     const current=L.createProject('static',16), signature=JSON.stringify(current);

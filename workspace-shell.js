@@ -20,7 +20,7 @@
       $(`workspace-${name}`).classList.toggle('active', active);
       $(`workspace-${name}`).setAttribute('aria-selected', String(active));
       const status = $(`${name}SaveState`);
-      status.textContent = state[name].dirty ? '● 未保存' : '保存済み';
+      status.textContent = state[name].dirty ? '● 未保存' : '変更なし';
       status.classList.toggle('dirty', state[name].dirty);
     }
     browser.document.title = `${state.active === 'atlas' ? 'Sprite Atlas' : 'LINEスタンプ'} — ローカル画像制作ツール`;

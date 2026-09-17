@@ -116,7 +116,7 @@ async function main() {
   await send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: pathToFileURL(path.join(__dirname, 'index.html')).href });
   await until("!!document.getElementById('nextFilename')?.textContent.includes('.png')");
-  await check('file://起動・画像0枚で保存不可', "document.getElementById('exportButton').disabled && document.getElementById('imageCount').textContent === '0'");
+  await check('file://起動・画像0枚で保存不可・dirty=falseは変更なし', "document.getElementById('exportButton').disabled && document.getElementById('imageCount').textContent === '0' && document.getElementById('atlasSaveState').textContent==='変更なし' && document.getElementById('lineSaveState').textContent==='変更なし'");
   await check('Sprite未選択時は反転コピー不可', "document.getElementById('flipHorizontalCopy').disabled && document.getElementById('flipVerticalCopy').disabled");
   await evaluate(`window.thumbPixels=async index=>{const img=document.querySelectorAll('.thumbnail img')[index],bitmap=await createImageBitmap(await(await fetch(img.src)).blob()),c=document.createElement('canvas');c.width=bitmap.width;c.height=bitmap.height;c.getContext('2d').drawImage(bitmap,0,0);return Array.from(c.getContext('2d').getImageData(0,0,c.width,c.height).data);};
     const c=document.createElement('canvas');c.width=3;c.height=2;const ctx=c.getContext('2d');
@@ -129,6 +129,9 @@ async function main() {
   await evaluate("const ignored=new DataTransfer();ignored.items.add(new File(['ignored'],'line-drop.png',{type:'image/png'}));window.dispatchEvent(new DragEvent('drop',{dataTransfer:ignored,bubbles:true,cancelable:true}));window.dispatchEvent(new ClipboardEvent('paste',{clipboardData:ignored,bubbles:true,cancelable:true}))");
   await check('LINE表示中のdrop/pasteは隠れたAtlasへ追加しない', "document.getElementById('imageCount').textContent==='1'");
   await check('Static予定数とPhase 1仕様を表示', "Array.from(document.getElementById('lineStickerCount').options).map(o=>o.value).join(',')==='8,16,24,32,40' && document.getElementById('lineStickerSpec').textContent.includes('370 × 320') && document.querySelectorAll('.line-slot').length===8");
+  await evaluate("document.getElementById('lineStickerCount').value='40';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}))");
+  await check('UIでもStatic 40→Animated 24へ丸めslot番号を維持', "document.getElementById('lineStickerCount').value==='24' && document.querySelectorAll('.line-slot').length===24 && document.querySelector('.line-slot').dataset.slot==='1' && document.querySelector('.line-slot:last-child').dataset.slot==='24'");
+  await evaluate("document.getElementById('lineType').value='static';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='8';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
   await evaluate("document.getElementById('lineStickerCount').value='16';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
   await check('LINE編集でLINE dirty・Atlas dirtyは独立維持', "WorkspaceShell.state.line.dirty && WorkspaceShell.state.atlas.dirty && document.querySelectorAll('.line-slot').length===16");
   await evaluate("document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='24';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");

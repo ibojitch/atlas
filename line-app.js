@@ -20,8 +20,8 @@
     $('lineStickerSpec').textContent = `最大 ${rule.stickerMaxWidth} × ${rule.stickerMaxHeight} px · ${rule.stickerFormat} · 1個1MB以下`;
     $('lineAnimationSpec').hidden = !animated;
     $('lineApngStatus').hidden = !animated;
-    $('lineSlots').replaceChildren(...Array.from({ length: project.targetStickerCount }, (_, index) => {
-      const slot = document.createElement('div'); slot.className = 'line-slot'; slot.innerHTML = `<span>${String(index + 1).padStart(2, '0')}</span><strong>Sticker</strong><small>Phase 1 · 画像未設定</small>`; return slot;
+    $('lineSlots').replaceChildren(...C.stickerSlotNumbers(project.targetStickerCount).map(slotNumber => {
+      const slot = document.createElement('div'); slot.className = 'line-slot'; slot.dataset.slot = slotNumber; slot.innerHTML = `<span>${String(slotNumber).padStart(2, '0')}</span><strong>Sticker</strong><small>Phase 1 · 画像未設定</small>`; return slot;
     }));
     $('lineProjectSummary').textContent = `${animated ? 'Animated' : 'Static'} · ${project.targetStickerCount} stickers\nMain: 未設定 / Tab: 未設定\nSticker: 0 / ${project.targetStickerCount}`;
   }

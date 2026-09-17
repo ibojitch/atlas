@@ -8,7 +8,7 @@ HTML / CSS / Vanilla JavaScriptのみで動作します。外部ライブラリ�
 
 画面上部で **Sprite Atlas** と **LINEスタンプ**を切り替えられます。切替は表示するDOMを変更するだけで、Atlasの画像・順番・設定・Inspector・Tags・offset・Animation・Group FPS・Grid追加結果・Project状態と、LINE Projectの状態をそれぞれメモリ上に保持します。切替のためのSAVE→LOADは不要です。
 
-各ワークスペースは独立した未保存状態を持ちます。Projectデータを「用意」しただけでは保存済みになりません。保存リンクを使用し、実際にファイルを保存できたことを確認してから「保存完了を確認」を押すと、そのワークスペースだけが保存済みになります。正常なProject LOAD後も保存済みになります。LOAD失敗時は現在のProjectと未保存状態を維持します。
+各ワークスペースは独立した未保存状態を持ちます。ヘッダーはdirtyなら「● 未保存」、dirtyでなければ、新規起動直後にも適切な「変更なし」と表示します。Projectデータを「用意」しただけではdirtyを解除しません。保存リンクを使用し、実際にファイルを保存できたことを確認してから「保存完了を確認」を押すと、そのワークスペースだけdirtyを解除します。正常なProject LOAD後も解除し、LOAD失敗時は現在のProjectと未保存状態を維持します。
 
 未保存変更があるProjectのLOAD、新規作成、全削除では確認ダイアログを表示します。キャンセルすると現在の状態を変更しません。ワークスペース切替では確認しません。AtlasまたはLINEのどちらかに未保存変更がある場合や、既存の書き出し準備・保存・読込処理中は、ページ更新やタブを閉じる際にブラウザ標準の離脱確認を使用します。
 
@@ -29,6 +29,14 @@ LINEワークスペースは現在Phase 1です。Static / Animated、スタン�
 ```
 
 Staticは8 / 16 / 24 / 32 / 40個、Animatedは8 / 16 / 24個を選択できます。Mainは240×240px、Tabは96×74px、Static Stickerは最大370×320px、Animated Stickerは最大320×270pxです。1画像1MB以下、Animatedの5～20 frames、loop 1～4、合計4秒以内、1 / 2 / 3 / 4秒、全frame同寸法という基準を将来のvalidation用定数として保持します。
+
+### Phase 1.1の型切替と将来スロット
+
+Static / Animatedのtype切替はProjectを作り直しません。`format`、`version`、Main、Tab、Stickers、将来の編集情報を保持し、typeと予定数だけを新しい制約へ合わせます。現在数が新しいtypeで使えない場合は、利用可能な候補のうち**現在値以下で最大の数**へ丸めます。したがってStatic 40 / 32はAnimated 24へ、24 / 16 / 8は同じ数へ移行します。AnimatedからStaticへの8 / 16 / 24は維持します。将来、切替後の画像が制約を満たさない場合も自動削除・縮小・変換はせず、validation errorとして扱う方針です。
+
+Phase 2のSticker Objectは、配列位置だけに依存せず、1始まりの明示的な`slot`番号を持たせます。これにより「03番が未設定」「07番を差し替え」のような操作でも順番を安定して管理します。Project version 1は互換性維持のため引き続き`stickers: []`で保存し、実画像ObjectのschemaはPhase 2で導入します。
+
+共通制約は各画像1MB以下、ZIP全体60MB以下、RGB、背景透過です。Static固有制約はPNG、最大370×320px、縦横偶数、72dpi以上、コンテンツ外周に約10pxの余白推奨です。Animated固有制約はAPNG、最大320×270px、縦横いずれか270px以上、全frame同寸法、5～20 frames、loop 1～4、再生時間1 / 2 / 3 / 4秒、合計4秒以内、frame余白と動かない部分の除去、1frame目を静止表示にも使用、です。Static固有の偶数サイズ・72dpi以上はAnimatedへ共通化していません。
 
 Phase 1では実画像の読込・加工、LINE用trim / resize、Main / Tab自動生成、PNG一括出力、ZIP、APNG解析・生成を行いません。**APNG Exportは未実装**です。外部ライブラリや疑似APNG生成も含めていません。
 

@@ -8,14 +8,24 @@
   <link rel="stylesheet" href="style.css">
   <script defer src="atlas-core.js"></script>
   <script defer src="atlas-render.js"></script>
+  <script defer src="line-core.js"></script>
+  <script defer src="line-image-core.js"></script>
+  <script defer src="line-render.js"></script>
+  <script defer src="zip-writer.js"></script>
+  <script defer src="workspace-shell.js"></script>
   <script defer src="app.js"></script>
+  <script defer src="line-app.js"></script>
 </head>
 <body>
   <header class="app-header">
-    <div><span class="eyebrow">LOCAL ASSET TOOL</span><h1>Sprite Atlas</h1></div>
+    <div><span class="eyebrow">LOCAL ASSET TOOL</span><h1>Sprite Workspace</h1></div>
+    <nav class="workspace-switcher" aria-label="ワークスペース切替" role="tablist">
+      <button id="workspace-atlas" class="workspace-tab active" type="button" role="tab" aria-controls="atlasWorkspace" aria-selected="true">Sprite Atlas <span id="atlasSaveState" class="save-state">変更なし</span></button>
+      <button id="workspace-line" class="workspace-tab" type="button" role="tab" aria-controls="lineWorkspace" aria-selected="false">LINEスタンプ <span id="lineSaveState" class="save-state">変更なし</span></button>
+    </nav>
     <p class="privacy"><span class="status-dot"></span>画像処理はすべて端末内で完結</p>
   </header>
-  <main class="workspace">
+  <main id="atlasWorkspace" class="workspace" data-workspace="atlas">
     <aside class="settings panel" aria-label="アトラス設定">
       <div class="section-heading"><h2>出力設定</h2><button id="resetSettings" class="text-button" type="button">初期値に戻す</button></div>
       <form id="settingsForm" novalidate>
@@ -76,7 +86,7 @@
       <section class="panel project-panel" aria-label="編集Project">
         <h2>編集Project</h2>
         <label>保存方式<select id="projectStorageMode"><option value="standard">通常Project — 元解像度・無劣化</option><option value="compact">Compact Project — 現在の用途向けに軽量化</option></select></label>
-        <div class="button-row"><button id="prepareProject" type="button" disabled>Projectを用意</button><a id="saveProjectLink" class="button" hidden>Projectを保存</a><button id="loadProject" type="button">ProjectをLOAD</button></div>
+        <div class="button-row"><button id="prepareProject" type="button" disabled>Projectを用意</button><a id="saveProjectLink" class="button" hidden>Projectを保存</a><button id="confirmProjectSave" class="primary" type="button" hidden disabled>保存完了を確認</button><button id="loadProject" type="button">ProjectをLOAD</button></div>
         <input id="projectInput" type="file" accept=".json,.satlas.json,application/json" hidden>
         <p id="projectStatus" class="hint">保存方式を選び、Projectを用意してください。</p>
         <p class="hint">通常は元画像を維持します。Compactは現在の有効範囲・描画倍率へ縮小するため、後から大幅に拡大しても元の細部は戻りません。Runtime用PNG/JSONとは別で、連番を進めません。</p>
@@ -144,6 +154,72 @@
       </div>
     </aside>
   </main>
-  <footer>Sprite Atlas · オフライン対応 <a href="README.md" target="_blank">使い方</a><a href="tests.html" target="_blank">自動テスト</a></footer>
+  <main id="lineWorkspace" class="workspace line-workspace" data-workspace="line" hidden>
+    <aside class="settings panel" aria-label="LINE Project設定">
+      <div class="section-heading"><h2>LINE Project</h2><button id="lineNewProject" class="text-button" type="button">新規Project</button></div>
+      <fieldset><legend>01 / 種類と予定数</legend>
+        <label>種類<select id="lineType"><option value="static">Static Sticker</option><option value="animated">Animated Sticker</option></select></label>
+        <label class="spaced">スタンプ予定数<select id="lineStickerCount"></select></label>
+      </fieldset>
+      <fieldset><legend>02 / Project SAVE / LOAD</legend>
+        <div class="button-row"><button id="linePrepareProject" type="button">Projectを用意</button><a id="lineSaveProject" class="button" hidden>Projectを保存</a><button id="lineConfirmSave" class="primary" type="button" hidden disabled>保存完了を確認</button><button id="lineLoadProject" type="button">ProjectをLOAD</button></div>
+        <input id="lineProjectInput" type="file" accept=".json,.line-project.json,application/json" hidden>
+        <p id="lineProjectStatus" class="hint">新しいLINE Projectです。</p>
+        <p class="hint">Projectを用意しただけでは保存済みになりません。リンクから保存後、「保存完了を確認」を押してください。</p>
+      </fieldset>
+      <fieldset id="lineStaticTools"><legend>03 / Static画像</legend>
+        <button id="lineAddImages" class="primary" type="button">画像を追加</button><input id="lineImageInput" type="file" accept="image/png,image/webp,image/jpeg" multiple hidden>
+        <p class="hint">PNG / WebP / JPEG。複数選択・drop・paste対応。元画像をProjectへ保持します。</p>
+      </fieldset>
+      <fieldset><legend>04 / 完成データ</legend>
+        <button id="linePrepareOutput" class="primary" type="button">PNG / ZIPを用意</button>
+        <div id="lineDownloads" class="button-row" hidden></div>
+        <p id="lineOutputStatus" class="hint">必要画像が揃うと出力できます。</p>
+      </fieldset>
+      <section class="line-spec-summary">
+        <h2>現在のLINE仕様概要</h2>
+        <p class="hint"><strong>Main Image</strong><br><span id="lineMainSpec"></span></p>
+        <p class="hint"><strong>Sticker</strong><br><span id="lineStickerSpec"></span></p>
+        <p class="hint"><strong>Tab Image</strong><br>96 × 74 px · PNG · 1MB以下</p>
+        <p id="lineAnimationSpec" class="hint">5～20 frames · loop 1～4 · 合計4秒以内 · 再生時間1 / 2 / 3 / 4秒 · 全frame同寸法</p>
+      </section>
+    </aside>
+    <section class="main-column">
+      <div id="lineNotice" class="notice" role="status" aria-live="polite" hidden></div>
+      <section class="panel line-assets-panel">
+        <div class="section-heading"><h2>Project Images</h2><span class="phase-badge">Static Phase 2</span></div>
+        <div class="line-special-images">
+          <article class="line-image-card"><div class="line-special-preview checker"><canvas id="lineMainCanvas" width="1" height="1"></canvas></div><div><h3>Main Image</h3><p>240 × 240 px</p><small id="lineMainStatus">未設定</small></div></article>
+          <article class="line-image-card"><div class="line-special-preview checker"><canvas id="lineTabCanvas" width="1" height="1"></canvas></div><div><h3>Tab Image</h3><p>96 × 74 px</p><small id="lineTabStatus">未設定</small></div></article>
+        </div>
+      </section>
+      <section class="panel line-stickers-panel">
+        <div class="section-heading"><h2>Sticker Slots</h2><span class="badge">予定数をProjectに保存</span></div>
+        <div id="lineSlots" class="line-slots"></div>
+      </section>
+    </section>
+    <aside class="panel inspector line-inspector" aria-label="LINE Project Inspector">
+      <h2>Sticker Inspector</h2>
+      <pre id="lineProjectSummary" class="line-project-summary"></pre>
+      <section id="lineInspectorEmpty" class="empty-state spaced"><p>Stickerスロットを選択してください。</p></section>
+      <section id="lineInspectorContent" hidden>
+        <div class="line-preview checker"><canvas id="linePreviewCanvas" width="1" height="1"></canvas></div>
+        <p id="linePreviewInfo" class="hint"></p>
+        <label>alphaしきい値<input id="lineThreshold" type="number" min="0" max="254" step="1"></label>
+        <label>余白 (px)<input id="lineMargin" type="number" min="0" max="40" step="1"></label>
+        <label>fit倍率<input id="lineScale" type="number" min="0.1" max="4" step="0.05"></label>
+        <label class="check"><input id="lineUpscale" type="checkbox">小さい画像を拡大</label>
+        <div class="two-cols"><label>offset X<input id="lineOffsetX" type="number" step="1"></label><label>offset Y<input id="lineOffsetY" type="number" step="1"></label></div>
+        <div class="button-row"><button id="lineMoveUp" type="button">前へ</button><button id="lineMoveDown" type="button">後へ</button><button id="lineReplaceImage" type="button">差し替え</button><button id="lineDeleteImage" type="button">削除</button></div>
+        <input id="lineReplaceInput" type="file" accept="image/png,image/webp,image/jpeg" hidden>
+        <div class="button-row"><button id="lineUseMain" type="button">Mainに使用</button><button id="lineUseTab" type="button">Tabに使用</button><button id="lineDownloadSelected" type="button">このPNGを用意</button></div>
+        <fieldset class="spaced"><legend>Main / Tab専用位置</legend><label>Main X<input id="lineMainOffsetX" type="number" step="1"></label><label>Main Y<input id="lineMainOffsetY" type="number" step="1"></label><label>Tab X<input id="lineTabOffsetX" type="number" step="1"></label><label>Tab Y<input id="lineTabOffsetY" type="number" step="1"></label></fieldset>
+      </section>
+      <section id="lineValidation" class="notice warning spaced"></section>
+      <section id="lineApngStatus" class="notice warning spaced" hidden><strong>Animated Sticker / APNG対応は開発中です</strong><br>今回はProject種別と仕様表示のみです。</section>
+      <p class="hint spaced">Canvas PNGは透明背景で生成します。72dpi metadataと厳密なRGB profileはブラウザ標準APIで保証できないためvalidation対象外です。</p>
+    </aside>
+  </main>
+  <footer>Sprite Atlas / LINEスタンプ · オフライン対応 <a href="README.md" target="_blank">使い方</a><a href="tests.html" target="_blank">自動テスト</a></footer>
 </body>
 </html>

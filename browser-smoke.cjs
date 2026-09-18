@@ -4,7 +4,7 @@
  */
 'use strict';
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { spawn } = require('node:child_process'), { pathToFileURL } = require('node:url');
+const { spawn, spawnSync } = require('node:child_process'), { pathToFileURL } = require('node:url');
 let executable, profile, child, spawnError, browserStderr = '', phase = 'browser detection', port, endpointStatus = 'not requested';
 const START_TIMEOUT = 15000, CDP_TIMEOUT = 20000;
 function findBrowser() {
@@ -74,9 +74,13 @@ function handleMessage(event) {
   if (message.id && pending.has(message.id)) { const p = pending.get(message.id); pending.delete(message.id); clearTimeout(p.timer); message.error ? p.reject(new Error(message.error.message)) : p.resolve(message.result); }
   if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
   if (message.method === 'Page.loadEventFired' && message.sessionId === session && loaded) loaded();
+  if (message.method === 'Page.javascriptDialogOpening' && message.sessionId === session) {
+    const accept = nextDialogAccept; nextDialogAccept = true;
+    send('Page.handleJavaScriptDialog', { accept }).catch(error => exceptions.push({ text: error.message }));
+  }
 }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
-let socket, session, nextId = 1, passed = 0, loaded;
+let socket, session, nextId = 1, passed = 0, loaded, nextDialogAccept = true;
 const pending = new Map(), exceptions = [];
 function send(method, params = {}, inPage = true, timeout = CDP_TIMEOUT) {
   return new Promise((resolve, reject) => {
@@ -112,13 +116,66 @@ async function main() {
   await send('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
   await send('Page.navigate', { url: pathToFileURL(path.join(__dirname, 'index.html')).href });
   await until("!!document.getElementById('nextFilename')?.textContent.includes('.png')");
-  await check('file://起動・画像0枚で保存不可', "document.getElementById('exportButton').disabled && document.getElementById('imageCount').textContent === '0'");
+  await check('file://起動・画像0枚で保存不可・dirty=falseは変更なし', "document.getElementById('exportButton').disabled && document.getElementById('imageCount').textContent === '0' && document.getElementById('atlasSaveState').textContent==='変更なし' && document.getElementById('lineSaveState').textContent==='変更なし'");
   await check('Sprite未選択時は反転コピー不可', "document.getElementById('flipHorizontalCopy').disabled && document.getElementById('flipVerticalCopy').disabled");
   await evaluate(`window.thumbPixels=async index=>{const img=document.querySelectorAll('.thumbnail img')[index],bitmap=await createImageBitmap(await(await fetch(img.src)).blob()),c=document.createElement('canvas');c.width=bitmap.width;c.height=bitmap.height;c.getContext('2d').drawImage(bitmap,0,0);return Array.from(c.getContext('2d').getImageData(0,0,c.width,c.height).data);};
     const c=document.createElement('canvas');c.width=3;c.height=2;const ctx=c.getContext('2d');
     for(const [x,y,color] of [[0,0,'#ff0000'],[1,0,'#00ff00'],[2,0,'#0000ff'],[0,1,'#ffff00'],[1,1,'#ff00ff'],[2,1,'#00ffff']]){ctx.fillStyle=color;ctx.fillRect(x,y,1,1);}
     const dt=new DataTransfer();dt.items.add(new File([await new Promise(r=>c.toBlob(r))],'asymmetric.png',{type:'image/png'}));window.dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));`);
   await until("document.getElementById('imageCount').textContent==='1' && !document.getElementById('flipHorizontalCopy').disabled");
+  await check('Atlas編集でAtlas dirtyのみtrue', "WorkspaceShell.state.atlas.dirty && !WorkspaceShell.state.line.dirty && document.getElementById('atlasSaveState').textContent.includes('未保存')");
+  await evaluate("document.getElementById('workspace-line').click()");
+  await check('Atlas→LINEでAtlas stateとdirtyを維持', "document.getElementById('atlasWorkspace').hidden && !document.getElementById('lineWorkspace').hidden && document.getElementById('imageCount').textContent==='1' && WorkspaceShell.state.atlas.dirty");
+  await evaluate("const ignored=new DataTransfer();ignored.items.add(new File(['ignored'],'line-drop.png',{type:'image/png'}));window.dispatchEvent(new DragEvent('drop',{dataTransfer:ignored,bubbles:true,cancelable:true}));window.dispatchEvent(new ClipboardEvent('paste',{clipboardData:ignored,bubbles:true,cancelable:true}))");
+  await check('LINE表示中のdrop/pasteは隠れたAtlasへ追加しない', "document.getElementById('imageCount').textContent==='1'");
+  await check('Static予定数とPhase 2仕様を表示', "Array.from(document.getElementById('lineStickerCount').options).map(o=>o.value).join(',')==='8,16,24,32,40' && document.getElementById('lineStickerSpec').textContent.includes('370 × 320') && document.querySelectorAll('.line-slot').length===8 && !document.getElementById('lineStaticTools').hidden");
+  await evaluate("document.getElementById('lineStickerCount').value='40';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}))");
+  await check('UIでもStatic 40→Animated 24へ丸めslot番号を維持', "document.getElementById('lineStickerCount').value==='24' && document.querySelectorAll('.line-slot').length===24 && document.querySelector('.line-slot').dataset.slot==='1' && document.querySelector('.line-slot:last-child').dataset.slot==='24'");
+  await evaluate("document.getElementById('lineType').value='static';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='8';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
+  await evaluate("document.getElementById('lineStickerCount').value='16';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
+  await check('LINE編集でLINE dirty・Atlas dirtyは独立維持', "WorkspaceShell.state.line.dirty && WorkspaceShell.state.atlas.dirty && document.querySelectorAll('.line-slot').length===16");
+  await evaluate("document.getElementById('lineType').value='animated';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='24';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
+  await check('Animatedは8/16/24・APNG未実装を表示', "Array.from(document.getElementById('lineStickerCount').options).map(o=>o.value).join(',')==='8,16,24' && document.getElementById('lineStickerSpec').textContent.includes('320 × 270') && !document.getElementById('lineApngStatus').hidden");
+  await evaluate("document.getElementById('linePrepareProject').click()");
+  await until("!document.getElementById('lineSaveProject').hidden");
+  await evaluate("window.lineSaved=await(await fetch(document.getElementById('lineSaveProject').href)).json()");
+  await check('LINE Project生成だけではdirtyを解除しない', "lineSaved.type==='animated' && lineSaved.targetStickerCount===24 && WorkspaceShell.state.line.dirty && document.getElementById('lineConfirmSave').disabled");
+  await evaluate("document.getElementById('lineSaveProject').click();document.getElementById('lineConfirmSave').click()");
+  await check('LINE保存完了確認後dirty=false', "!WorkspaceShell.state.line.dirty && WorkspaceShell.state.atlas.dirty");
+  await evaluate("document.getElementById('lineStickerCount').value='16';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));window.lineBeforeFailure=JSON.stringify({type:document.getElementById('lineType').value,count:document.getElementById('lineStickerCount').value,dirty:WorkspaceShell.state.line.dirty});window.loadLineText=text=>{const dt=new DataTransfer();dt.items.add(new File([text],'line-project.json',{type:'application/json'}));const input=document.getElementById('lineProjectInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));};loadLineText('{broken')");
+  await until("document.getElementById('lineNotice').textContent.includes('現在の編集内容は維持')");
+  await check('malformed LINE Projectはstateとdirtyをatomic維持', "JSON.stringify({type:document.getElementById('lineType').value,count:document.getElementById('lineStickerCount').value,dirty:WorkspaceShell.state.line.dirty})===lineBeforeFailure");
+  await evaluate("loadLineText(JSON.stringify({format:'line-stamp-project',version:1,type:'static',targetStickerCount:40,mainImage:null,tabImage:null,stickers:[]}))");
+  await until("document.getElementById('lineNotice').textContent.includes('40個のLINE Project')");
+  await check('LINE Project LOAD成功後dirty=false・type/count復元', "document.getElementById('lineType').value==='static' && document.getElementById('lineStickerCount').value==='40' && !WorkspaceShell.state.line.dirty");
+  await evaluate("document.getElementById('lineNewProject').click()");
+  await evaluate(`window.addLineSet=async()=>{const dt=new DataTransfer();for(let n=1;n<=8;n++){const c=document.createElement('canvas');c.width=80+n;c.height=60+n;const x=5+n%3,y=4+n%2,ctx=c.getContext('2d');ctx.fillStyle='hsl('+n*40+' 80% 50%)';ctx.fillRect(x,y,50,40);dt.items.add(new File([await new Promise(r=>c.toBlob(r))],'stamp-'+n+'.png',{type:'image/png'}));}const input=document.getElementById('lineImageInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));};await addLineSet();`);
+  await until("document.querySelectorAll('.line-slot.filled').length===8 && !document.getElementById('lineInspectorContent').hidden");
+  await check('Static複数画像読込・元画像寸法・自動trim preview', "document.getElementById('lineProjectSummary').textContent.includes('Sticker: 8 / 8') && document.querySelector('.line-slot[data-slot=\"1\"] small').textContent==='stamp-1.png' && document.getElementById('linePreviewInfo').textContent.includes('元 88×68') && document.getElementById('linePreviewCanvas').width%2===0 && document.getElementById('linePreviewCanvas').width<=370");
+  await evaluate("document.querySelector('.line-slot[data-slot=\"1\"]').click();document.getElementById('lineOffsetX').value='3';document.getElementById('lineOffsetX').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineOffsetY').value='-2';document.getElementById('lineOffsetY').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineUseMain').click();document.getElementById('lineUseTab').click();document.getElementById('lineMoveDown').click()");
+  await check('offset・並べ替え・安定IDのMain/Tab参照・dirty独立', "document.querySelector('.line-slot[data-slot=\"2\"] small').textContent==='stamp-1.png' && document.getElementById('lineMainStatus').textContent.includes('02 stamp-1.png') && document.getElementById('lineTabStatus').textContent.includes('02 stamp-1.png') && WorkspaceShell.state.line.dirty && WorkspaceShell.state.atlas.dirty");
+  await evaluate("document.getElementById('linePrepareOutput').click()");
+  await until("document.getElementById('lineDownloads').querySelectorAll('a').length===11");
+  await check('Main/Tab/8 Sticker/ZIP生成・公式名・寸法', "Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).map(a=>a.download).join(',')==='main.png,tab.png,01.png,02.png,03.png,04.png,05.png,06.png,07.png,08.png,line-static-stickers.zip' && document.getElementById('lineMainCanvas').width===240 && document.getElementById('lineMainCanvas').height===240 && document.getElementById('lineTabCanvas').width===96 && document.getElementById('lineTabCanvas').height===74");
+  await evaluate("window.lineZipBytes=new Uint8Array(await(await fetch(Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).at(-1).href)).arrayBuffer());window.lineZipFiles=ZipWriter.inspect(lineZipBytes);Array.from(document.getElementById('lineDownloads').querySelectorAll('a')).at(-1).click()");
+  await check('ZIP STORE CRC・格納PNG bytes・root filenames一致', "lineZipFiles.length===10 && lineZipFiles.map(f=>f.name).join(',')==='main.png,tab.png,01.png,02.png,03.png,04.png,05.png,06.png,07.png,08.png' && lineZipFiles.every(f=>LineImageCore.parsePng(f.data).width>0)");
+  for(let n=0;n<100&&!fs.existsSync(path.join(profile,'downloads','line-static-stickers.zip'));n++)await pause(50);
+  const zipPath=path.join(profile,'downloads','line-static-stickers.zip'),expandPath=path.join(profile,'expanded-line-zip');
+  if(process.platform==='win32'){
+    fs.mkdirSync(expandPath);phase='Windows standard tar ZIP validation';const expanded=spawnSync('tar.exe',['-xf',zipPath,'-C',expandPath],{windowsHide:true,encoding:'utf8'});
+    if(expanded.status!==0)throw new Error('Windows標準tar ZIP展開失敗: '+expanded.stderr);
+    if(fs.readdirSync(expandPath).sort().join(',')!==['01.png','02.png','03.png','04.png','05.png','06.png','07.png','08.png','main.png','tab.png'].sort().join(','))throw new Error('Windows展開後ファイル名が不正');
+    console.log('PASS Windows標準tarでZIP展開');passed++;
+  }
+  await evaluate("document.getElementById('linePrepareProject').click()");await until("!document.getElementById('lineSaveProject').hidden");await evaluate("window.lineV2=await(await fetch(document.getElementById('lineSaveProject').href)).json();window.lineV2Signature=JSON.stringify(lineV2);loadLineText(JSON.stringify(lineV2))");await until("document.getElementById('lineNotice').textContent.includes('8個のLINE Project')");
+  await check('LINE Project v2元画像・編集値・順番・Main/Tab SAVE→LOAD', "lineV2.version===2 && lineV2.stickers.length===8 && lineV2.stickers.find(s=>s.source.name==='stamp-1.png').slot===2 && lineV2.stickers.find(s=>s.source.name==='stamp-1.png').edit.offsetX===3 && lineV2.mainImage.sourceStickerId===lineV2.tabImage.sourceStickerId && document.getElementById('lineMainStatus').textContent.includes('stamp-1.png') && !WorkspaceShell.state.line.dirty");
+  await evaluate("const p=structuredClone(lineV2);p.stickers[0].source.data='data:image/png;base64,broken';window.lineAtomicBefore=document.getElementById('lineProjectSummary').textContent;loadLineText(JSON.stringify(p))");await until("document.getElementById('lineNotice').textContent.includes('現在の編集内容は維持')");
+  await check('壊れたv2埋込画像もatomic LOAD', "document.getElementById('lineProjectSummary').textContent===lineAtomicBefore && !WorkspaceShell.state.line.dirty");
+  await evaluate("document.getElementById('lineStickerCount').value='32';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}))");
+  nextDialogAccept = false; await evaluate("document.getElementById('lineNewProject').click()");
+  await check('dirtyなLINE新規作成のキャンセルは状態を変更しない', "document.getElementById('lineType').value==='static' && document.getElementById('lineStickerCount').value==='32' && WorkspaceShell.state.line.dirty");
+  await evaluate("document.getElementById('workspace-atlas').click()");
+  await check('LINE→Atlasで双方stateとdirtyを維持', "document.getElementById('imageCount').textContent==='1' && WorkspaceShell.state.atlas.dirty && WorkspaceShell.state.line.dirty && document.getElementById('lineStickerCount').value==='32' && WorkspaceShell.hasUnsavedChanges()");
   await evaluate("document.getElementById('offsetX').value='3';document.getElementById('offsetX').dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('offsetY').value='-2';document.getElementById('offsetY').dispatchEvent(new Event('input',{bubbles:true}));document.getElementById('groupId').value='walk';document.getElementById('groupId').dispatchEvent(new Event('input',{bubbles:true}));window.originalFlipPixels=await thumbPixels(0);document.getElementById('flipHorizontalCopy').click()");
   await until("document.getElementById('imageCount').textContent==='2' && document.querySelectorAll('.image-row.selected').length===1");
   await check('左右反転コピーの画素・命名・offset継承・Animation未所属', "JSON.stringify(await thumbPixels(1))===JSON.stringify(Array.from({length:6},(_,i)=>originalFlipPixels.slice((Math.floor(i/3)*3+(2-i%3))*4,(Math.floor(i/3)*3+(2-i%3)+1)*4)).flat()) && document.querySelectorAll('.sprite-name')[1].textContent==='asymmetric_flipH' && document.getElementById('offsetX').value==='3' && document.getElementById('offsetY').value==='-2' && document.getElementById('groupId').value==='' ");
@@ -266,9 +323,12 @@ async function main() {
   await until("!document.getElementById('saveProjectLink').hidden");
   await evaluate("window.projectOne=await(await fetch(document.getElementById('saveProjectLink').href)).json()");
   await check('通常Project v2は画像・設定・順番・Tags・offset・抽出配置・Animation・FPSを保持', "projectOne.format==='sprite-atlas-project' && projectOne.version===2 && projectOne.storageMode==='standard' && projectOne.sprites.length===18 && projectOne.sprites.some(s=>s.extracted) && projectOne.sprites[0].tags.join('|')==='purple|walk|Walk|character:purple' && projectOne.sprites[0].offsetX===5 && projectOne.sprites[0].offsetY===-4 && projectOne.sprites[0].groupId==='grid-walk' && projectOne.sprites[0].animationOrder===2 && projectOne.sprites[0].durationFrames===4 && projectOne.groups.find(g=>g.id==='grid-walk').fps===18 && projectOne.sprites.every(s=>s.image.startsWith('data:image/png;base64,') && s.sourceScaleX===1 && s.sourceScaleY===1)");
+  await check('Atlas Project生成だけではdirtyを解除しない', "WorkspaceShell.state.atlas.dirty && document.getElementById('confirmProjectSave').disabled");
+  await evaluate("window.lineDirtyBeforeAtlasSave=WorkspaceShell.state.line.dirty;document.getElementById('saveProjectLink').click();document.getElementById('confirmProjectSave').click()");
+  await check('Atlas保存完了確認後dirty=false・LINE dirtyとは独立', "!WorkspaceShell.state.atlas.dirty && WorkspaceShell.state.line.dirty===lineDirtyBeforeAtlasSave");
   await evaluate(`document.getElementById('clearImages').click();const dt=new DataTransfer();dt.items.add(new File([JSON.stringify(projectOne)],'roundtrip.satlas.json',{type:'application/json'}));const input=document.getElementById('projectInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));`);
   await until("document.getElementById('notice').textContent.includes('18 Spriteの編集Projectを読み込みました')");
-  await check('Project LOADで論理状態・抽出配置・最終Atlas画素を復元', "document.getElementById('imageCount').textContent==='18' && document.getElementById('atlasCanvas').toDataURL()===projectAtlasBefore && document.getElementById('spriteTags').value==='purple, walk, Walk, character:purple' && document.getElementById('offsetX').value==='5' && document.getElementById('groupFps').value==='18' && projectOne.sprites.some(s=>s.extracted)");
+  await check('Project LOADで論理状態・最終Atlas画素を復元しdirty=false', "document.getElementById('imageCount').textContent==='18' && document.getElementById('atlasCanvas').toDataURL()===projectAtlasBefore && document.getElementById('spriteTags').value==='purple, walk, Walk, character:purple' && document.getElementById('offsetX').value==='5' && document.getElementById('groupFps').value==='18' && projectOne.sprites.some(s=>s.extracted) && !WorkspaceShell.state.atlas.dirty");
   await evaluate("document.getElementById('prepareProject').click()"); await until("!document.getElementById('saveProjectLink').hidden");
   await evaluate(`const c=document.createElement('canvas');c.width=512;c.height=512;const ctx=c.getContext('2d'),image=ctx.createImageData(512,512);for(let i=0;i<512*512;i++){image.data[i*4]=(i*73)%256;image.data[i*4+1]=(i*151+Math.floor(i/512)*31)%256;image.data[i*4+2]=(i*199+Math.floor(i/512)*17)%256;image.data[i*4+3]=255;}ctx.putImageData(image,0,0);const dt=new DataTransfer();dt.items.add(new File([await new Promise(r=>c.toBlob(r))],'large-source.png',{type:'image/png'}));const input=document.getElementById('fileInput');input.files=dt.files;input.dispatchEvent(new Event('change',{bubbles:true}));`);
   await until("document.getElementById('imageCount').textContent==='19' && !document.getElementById('exportButton').disabled");
@@ -314,6 +374,10 @@ async function main() {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: "Storage.prototype.getItem=function(){throw new Error('storage blocked');};Storage.prototype.setItem=function(){throw new Error('storage blocked');};" });
   await reload();
   await check('localStorage利用不可でも起動・警告', "document.getElementById('nextFilename').textContent.includes('_0000.png') && document.getElementById('notice').classList.contains('warning')");
+  if (process.env.ATLAS_SCREENSHOT) {
+    await evaluate("document.getElementById('workspace-line').click();document.getElementById('lineType').value='static';document.getElementById('lineType').dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('lineStickerCount').value='8';document.getElementById('lineStickerCount').dispatchEvent(new Event('change',{bubbles:true}));window.scrollTo(0,0)");
+    const lineShot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.resolve(process.env.ATLAS_SCREENSHOT),Buffer.from(lineShot.data,'base64'));
+  }
   await send('Page.navigate', { url: pathToFileURL(path.join(__dirname, 'tests.html')).href });
   await until("!!document.body?.dataset.testStatus");
   if (!(await evaluate("document.body.dataset.testStatus==='passed'"))) throw new Error('Canvas/PNGテスト失敗');

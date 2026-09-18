@@ -1,7 +1,7 @@
 /* ブラウザ標準APIのみ。file://で動くようES Modulesは使用しない。 */
 (function () {
   'use strict';
-  const C = window.AtlasCore, R = window.AtlasRenderer;
+  const C = window.AtlasCore, R = window.AtlasRenderer, W = window.WorkspaceShell;
   const $ = id => document.getElementById(id);
   const form = $('settingsForm');
   const SETTINGS_KEY = 'sprite-atlas.settings.v1', SEQUENCE_KEY = 'sprite-atlas.sequence.v1';
@@ -11,17 +11,18 @@
     selectedItemId: null, groups: new Map(), plan: null, validItems: [], pending: null, totalPixels: 0, sequence: null,
     timer: null, queue: Promise.resolve(), storageWarning: false };
   const playback = { raf: null, playing: false, start: 0, groupId: '', animation: null, frameIndex: -1 };
-  let gridSource = null, projectUrl = null;
+  let gridSource = null, projectUrl = null, projectSaveLinkUsed = false;
 
   function message(text, kind = 'info') {
     $('notice').textContent = text; $('notice').className = `notice ${kind}`; $('notice').hidden = !text;
   }
   function invalidateProjectDownload(status = '未保存の変更があります。もう一度Projectを用意してください。') {
     if (projectUrl) URL.revokeObjectURL(projectUrl);
-    projectUrl = null; $('saveProjectLink').hidden = true; $('saveProjectLink').removeAttribute('href');
+    projectUrl = null; projectSaveLinkUsed = false; $('saveProjectLink').hidden = true; $('saveProjectLink').removeAttribute('href');
+    $('confirmProjectSave').hidden = true; $('confirmProjectSave').disabled = true;
     $('projectStatus').textContent = status;
   }
-  function markProjectChanged() { invalidateProjectDownload(); }
+  function markProjectChanged() { invalidateProjectDownload(); W.setDirty('atlas', true); }
   function readStorage(key) {
     try { return JSON.parse(localStorage.getItem(key)); }
     catch { state.storageWarning = true; return null; }
@@ -499,6 +500,7 @@
       $('saveProjectLink').href = projectUrl;
       $('saveProjectLink').download = `sprite-atlas-${C.localDate()}${storageMode === 'compact' ? '.compact' : ''}.satlas.json`;
       $('saveProjectLink').hidden = false;
+      $('confirmProjectSave').hidden = false; $('confirmProjectSave').disabled = true; projectSaveLinkUsed = false;
       const size = blob.size < 1048576 ? `${Math.ceil(blob.size / 1024)}KB` : `${(blob.size / 1048576).toFixed(1)}MB`;
       $('projectStatus').textContent = `${storageMode === 'compact' ? 'Compact' : '通常'}Projectを用意済み（約${size}）。編集するとこのリンクは無効になります。`;
       message('編集Projectを用意しました。Project保存リンクから保存してください。Runtime連番は変更していません。');
@@ -524,7 +526,7 @@
     } catch (error) { if (bitmap) bitmap.close(); throw error; }
   }
   async function loadProjectFile(file) {
-    if (!file || state.busy || state.saving) return;
+    if (!file || state.busy || state.saving || !W.confirmDestructive('atlas')) return;
     state.busy = true; updateButtons(); const temporary = [];
     try {
       let parsed; try { parsed = JSON.parse(await file.text()); } catch { throw new Error('Project JSONを解析できません。'); }
@@ -546,7 +548,7 @@
       state.settings = { ...project.settings }; state.groups = new Map(project.groups); state.nextId = state.items.length + 1; state.selectedItemId = state.items[0]?.id ?? null;
       populateSettings(); $('projectStorageMode').value = project.storageMode;
       invalidateProjectDownload('ProjectをLOADしました。編集内容を保存するにはProjectを用意してください。');
-      rebuild(); message(`${file.name}: ${state.items.length} Spriteの編集Projectを読み込みました。`);
+      rebuild(); W.setDirty('atlas', false); message(`${file.name}: ${state.items.length} Spriteの編集Projectを読み込みました。`);
     } catch (error) { closeTemporaryItems(temporary); message(`Projectを読み込めません：${error.message} 現在の編集内容は維持しました。`, 'error'); }
     finally { state.busy = false; rebuild(); }
   }
@@ -602,15 +604,22 @@
   for (const id of ['gridCellWidth', 'gridCellHeight', 'gridColumns', 'gridRows']) $(id).addEventListener('input', updateGridSummary);
   $('addGrid').addEventListener('click', () => { state.queue = state.queue.then(importGrid); });
   $('prepareProject').addEventListener('click', prepareProjectDownload);
+  $('saveProjectLink').addEventListener('click', () => { projectSaveLinkUsed = true; $('confirmProjectSave').disabled = false; });
+  $('confirmProjectSave').addEventListener('click', () => {
+    if (!projectSaveLinkUsed) return;
+    W.setDirty('atlas', false); $('confirmProjectSave').disabled = true; $('projectStatus').textContent = '保存完了を確認しました。';
+    message('Atlas Projectの保存完了を記録しました。');
+  });
   $('projectStorageMode').addEventListener('change', () => invalidateProjectDownload('保存方式を変更しました。Projectをもう一度用意してください。'));
   $('loadProject').addEventListener('click', () => $('projectInput').click());
   $('projectInput').addEventListener('change', event => { const file = event.target.files[0]; event.target.value = ''; if (file) state.queue = state.queue.then(() => loadProjectFile(file)); });
   let dragDepth = 0;
-  window.addEventListener('dragenter', event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dragDepth++; $('dropZone').classList.add('dragging'); } });
-  window.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); });
+  window.addEventListener('dragenter', event => { if (W.state.active === 'atlas' && event.dataTransfer.types.includes('Files')) { event.preventDefault(); dragDepth++; $('dropZone').classList.add('dragging'); } });
+  window.addEventListener('dragover', event => { if (W.state.active === 'atlas' && event.dataTransfer.types.includes('Files')) event.preventDefault(); });
   window.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('dropZone').classList.remove('dragging'); } });
-  window.addEventListener('drop', event => { event.preventDefault(); dragDepth = 0; $('dropZone').classList.remove('dragging'); enqueueFiles(event.dataTransfer.files); });
+  window.addEventListener('drop', event => { if (W.state.active !== 'atlas') return; event.preventDefault(); dragDepth = 0; $('dropZone').classList.remove('dragging'); enqueueFiles(event.dataTransfer.files); });
   window.addEventListener('paste', event => {
+    if (W.state.active !== 'atlas') return;
     const files = Array.from(event.clipboardData?.items || []).filter(i => i.kind === 'file' && i.type.startsWith('image/')).map(i => i.getAsFile()).filter(Boolean);
     if (files.length) { event.preventDefault(); enqueueFiles(files); }
   });
@@ -673,7 +682,7 @@
     rebuild();
     if (action !== 'delete') $('imageList').querySelector(`[data-id="${item.id}"] button[data-action="${action}"]`)?.focus();
   });
-  $('clearImages').addEventListener('click', () => { state.items.forEach(disposeItem); state.items = []; state.groups.clear(); markProjectChanged(); rebuild(); message('入力画像をすべて削除しました。'); });
+  $('clearImages').addEventListener('click', () => { if (!W.confirmDestructive('atlas')) return; state.items.forEach(disposeItem); state.items = []; state.groups.clear(); markProjectChanged(); rebuild(); message('入力画像をすべて削除しました。'); });
   $('zoom').addEventListener('change', resizePreview); $('showGrid').addEventListener('change', resizePreview);
   new ResizeObserver(resizePreview).observe($('previewViewport'));
   $('exportButton').addEventListener('click', exportAtlas);
@@ -685,7 +694,7 @@
     commitSequence(state.pending.date, state.pending.number); clearPending(); message('保存完了を記録しました。次の書き出しは新しい番号になります。');
   });
   $('cancelDownloads').addEventListener('click', () => { clearPending(); message('書き出しデータを閉じました。連番は進めていません。保存済みの場合は次回の同名ファイルにご注意ください。', 'warning'); });
-  window.addEventListener('beforeunload', event => { if (state.pending || state.saving || state.busy) { event.preventDefault(); event.returnValue = ''; } });
+  W.setUnsafeChecker('atlas', () => !!(state.pending || state.saving || state.busy));
   window.addEventListener('pagehide', event => { cancelPlayback(); playback.playing = false; if (!event.persisted) {
     state.items.forEach(disposeItem); clearPending(); if (gridSource?.image) gridSource.image.close(); gridSource = null;
     if (projectUrl) URL.revokeObjectURL(projectUrl); projectUrl = null;

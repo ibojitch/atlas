@@ -1,7 +1,12 @@
 /* Node: node core-tests.js / ブラウザ: tests.html */
 (function (root) {
   'use strict';
-  const C = typeof module !== 'undefined' && module.exports ? require('./atlas-core.js') : root.AtlasCore;
+  const node = typeof module !== 'undefined' && module.exports;
+  const C = node ? require('./atlas-core.js') : root.AtlasCore;
+  const L = node ? require('./line-core.js') : root.LineStampCore;
+  const LI = node ? require('./line-image-core.js') : root.LineImageCore;
+  const Z = node ? require('./zip-writer.js') : root.ZipWriter;
+  const W = node ? require('./workspace-shell.js') : root.WorkspaceShell;
   const tests = [];
   function test(name, run) { tests.push({ name, run }); }
   function equal(actual, expected) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`期待値 ${JSON.stringify(expected)} / 実際 ${JSON.stringify(actual)}`); }
@@ -222,6 +227,63 @@
       const p={format:'sprite-atlas-project',version:2,storageMode:'compact',settings:settings(),groups:[],sprites:[{...sprite}]};change(p);throws(()=>C.validateProject(p));
     }
     equal(C.itemTrim({x:2,y:3,width:10,height:20},8,{sourceScaleX:.25,sourceScaleY:.5}),{x:0,y:-1,width:14,height:28});
+  });
+  test('LINE Static / Animatedの制約と初期Project', () => {
+    equal(L.LIMITS.static.counts,[8,16,24,32,40]); equal(L.LIMITS.animated.counts,[8,16,24]);
+    equal(L.LIMITS.mainImage,{width:240,height:240}); equal(L.LIMITS.tabImage,{width:96,height:74,format:'PNG'});
+    equal(L.LIMITS.maxFileBytes,1048576); const p=L.createProject();equal([p.version,p.type,p.targetStickerCount,p.stickers.length],[2,'static',8,0]);equal(p.mainImage,L.DEFAULT_SPECIAL);
+  });
+  test('LINE Project type/count SAVE→LOAD相当のJSON往復', () => {
+    for(const [type,counts] of [['static',[8,16,24,32,40]],['animated',[8,16,24]]]) for(const count of counts) {
+      const project=L.createProject(type,count); equal(L.validateProject(JSON.parse(JSON.stringify(project))),project);
+    }
+    equal(L.changeType(L.createProject('static',40),'animated').targetStickerCount,24);
+  });
+  test('LINE type変更は現在値以下の最大Sticker数へ丸める', () => {
+    for(const [from,to,expected] of [[40,'animated',24],[32,'animated',24],[24,'animated',24],[16,'animated',16],[8,'animated',8],[24,'static',24]]) {
+      const source=L.createProject(to==='static'?'animated':'static',from); equal(L.normalizeStickerCount(to,from),expected); equal(L.changeType(source,to).targetStickerCount,expected);
+    }
+  });
+  test('LINE type変更は元Projectをmutateせず将来データを保持', () => {
+    const mainImage={id:'main'},tabImage={id:'tab'},stickers=[{slot:3,id:'third'}],editing={selectedSlot:3};
+    const source={format:'line-stamp-project',version:2,type:'static',targetStickerCount:40,mainImage,tabImage,stickers,editing,futureField:'keep'};
+    const before={...source},changed=L.changeType(source,'animated');
+    equal(source,before); equal(changed,{...source,type:'animated',targetStickerCount:24});
+    if(changed===source||changed.mainImage!==mainImage||changed.tabImage!==tabImage||changed.stickers!==stickers||changed.editing!==editing)throw new Error('既存Projectデータを保持していません。');
+  });
+  test('LINE仕様定数は共通・Static固有・Animated固有を分離', () => {
+    equal(L.LIMITS.common,{maxFileBytes:1048576,maxZipBytes:62914560,colorMode:'RGB',transparentBackground:true});
+    equal(L.LIMITS.static.sticker,{format:'PNG',maxWidth:370,maxHeight:320,dimensionMultiple:2,minDpi:72,recommendedOuterMarginPx:10});
+    equal(L.LIMITS.animated.sticker,{format:'APNG',maxWidth:320,maxHeight:270,minEitherDimension:270,sameFrameDimensions:true,framesMin:5,framesMax:20,loopsMin:1,loopsMax:4,allowedDurations:[1,2,3,4],totalDurationMax:4,removeFrameMargins:true,removeStaticParts:true,firstFrameUsedAsStill:true});
+    if('dimensionMultiple' in L.LIMITS.animated.sticker||'minDpi' in L.LIMITS.animated.sticker)throw new Error('Static固有制約がAnimatedへ混入しています。');
+  });
+  test('将来Stickerは明示的な1-based slotで安定管理する', () => {
+    equal(L.STICKER_SLOT_POLICY,{strategy:'explicit-slot',field:'slot',firstSlot:1}); equal(L.stickerSlotNumbers(8),[1,2,3,4,5,6,7,8]); throws(()=>L.stickerSlotNumbers(0));
+  });
+  test('malformed LINE Projectを拒否し入力を変更しない', () => {
+    const current=L.createProject('static',16), signature=JSON.stringify(current);
+    for(const change of [p=>p.format='wrong',p=>p.version=99,p=>p.type='video',p=>p.targetStickerCount=40,p=>p.mainImage='x',p=>p.tabImage='x',p=>p.stickers=[{}]]) {
+      const broken=JSON.parse(JSON.stringify(L.createProject('animated',8))); change(broken); throws(()=>L.validateProject(broken)); equal(JSON.stringify(current),signature);
+    }
+  });
+  function lineSticker(id,slot,name=id){return{id,slot,source:{name:name+'.png',type:'image/png',width:20,height:30,data:'data:image/png;base64,AA=='},edit:{...L.DEFAULT_EDIT}};}
+  test('LINE v1 LOAD互換とv2 SAVE/LOAD roundtrip',()=>{
+    const v1={format:'line-stamp-project',version:1,type:'static',targetStickerCount:8,mainImage:null,tabImage:null,stickers:[]};const migrated=L.validateProject(v1);equal([migrated.version,migrated.stickers.length],[2,0]);
+    const p=L.createProject('static',8);p.stickers=[lineSticker('a',1),lineSticker('b',3)];p.mainImage={...p.mainImage,sourceStickerId:'a'};p.tabImage={...p.tabImage,sourceStickerId:'b'};equal(L.validateProject(JSON.parse(JSON.stringify(p))),p);
+  });
+  test('LINE slotのempty / replace / delete / reorderと参照ID維持',()=>{
+    let p=L.createProject();p=L.putSticker(p,lineSticker('a',1));p=L.putSticker(p,lineSticker('b',3));equal([L.bySlot(p,2),L.bySlot(p,3).id],[null,'b']);p={...p,mainImage:{...p.mainImage,sourceStickerId:'a'}};p=L.moveSticker(p,1,3);equal([L.bySlot(p,1).id,L.bySlot(p,3).id,p.mainImage.sourceStickerId],['b','a','a']);p=L.putSticker(p,lineSticker('a',3,'replaced'));equal([L.bySlot(p,3).source.name,p.mainImage.sourceStickerId],['replaced.png','a']);p=L.putSticker(p,lineSticker('c',1));equal(L.bySlot(p,1).id,'c');p=L.removeSticker(p,3);equal([L.bySlot(p,3),p.mainImage.sourceStickerId],[null,null]);
+  });
+  test('LINE alpha trim・透明拒否・偶数化・fit・aspect・offset',()=>{
+    const d=new Uint8ClampedArray(5*7*4);d[(2*5+1)*4+3]=2;d[(6*5+4)*4+3]=255;const b=LI.alphaBounds(d,5,7,1);equal(b,{x:1,y:2,width:4,height:5});equal(LI.alphaBounds(new Uint8ClampedArray(16),2,2,1),null);const p=LI.stickerPlan(b,{...L.DEFAULT_EDIT,offsetX:3,offsetY:-2});if(p.width%2||p.height%2||p.width>370||p.height>320)throw new Error('偶数/max違反');near(p.draw.width/p.draw.height,4/5);near(p.draw.x-(p.width-p.draw.width)/2,3);near(p.draw.y-(p.height-p.draw.height)/2,-2);
+  });
+  test('LINE Main 240×240 / Tab 96×74のcenter fit',()=>{const b={x:0,y:0,width:100,height:50},m=LI.fixedPlan(b,240,240),t=LI.fixedPlan(b,96,74);equal([m.width,m.height,t.width,t.height],[240,240,96,74]);near(m.draw.width/m.draw.height,2);near(t.draw.width/t.draw.height,2);});
+  test('LINE completion validation: missing・1MB・60MB',()=>{const p=L.createProject();let e=L.validateCompletion(p);if(!e.some(x=>x.includes('未設定')))throw new Error('missing');p.stickers=L.stickerSlotNumbers(8).map(n=>lineSticker('s'+n,n));p.mainImage={...p.mainImage,sourceStickerId:'s1'};p.tabImage={...p.tabImage,sourceStickerId:'s1'};equal(L.validateCompletion(p),[]);if(!L.validateCompletion(p,[{name:'01.png',size:1048577}]).some(x=>x.includes('1MB')))throw new Error('1MB');if(!L.validateCompletion(p,Array.from({length:61},(_,i)=>({name:i+'.png',size:1048576}))).some(x=>x.includes('60MB')))throw new Error('60MB');});
+  test('ZIP STORE signature・filename・CRC32・bytes一致',()=>{const entries=[{name:'main.png',data:new Uint8Array([1,2,3])},{name:'01.png',data:new Uint8Array([4,5])}],zip=Z.create(entries);equal(Array.from(zip.slice(0,4)),[80,75,3,4]);const files=Z.inspect(zip);equal(files.map(f=>f.name),['main.png','01.png']);equal(files.map(f=>Array.from(f.data)),[[1,2,3],[4,5]]);equal(files.map(f=>f.crc),entries.map(e=>Z.crc32(e.data)));});
+  test('workspace dirtyは独立し切替相当のactive変更で維持', () => {
+    const state=W.createState(); W.setDirtyState(state,'atlas',true); state.active='line'; equal([state.atlas.dirty,state.line.dirty,W.hasUnsavedChanges(state)],[true,false,true]);
+    W.setDirtyState(state,'line',true); state.active='atlas'; equal([state.atlas.dirty,state.line.dirty],[true,true]); W.setDirtyState(state,'atlas',false); equal([state.atlas.dirty,state.line.dirty,W.hasUnsavedChanges(state)],[false,true,true]);
+    W.setDirtyState(state,'line',false); equal(W.hasUnsavedChanges(state),false);
   });
   test('経過時間再生の境界・遅延・ループ・非ループ終端', () => {
     const a={fps:60,frames:[{sprite:2,duration:3},{sprite:0,duration:6}]};

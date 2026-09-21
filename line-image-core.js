@@ -27,25 +27,27 @@
   }
   const evenCeil = value => Math.max(2, Math.ceil(value / 2) * 2);
   function stickerPlan(bounds, rawEdit = {}) {
-    if (!bounds || !Number.isFinite(bounds.width) || bounds.width <= 0 || !Number.isFinite(bounds.height) || bounds.height <= 0) throw new Error('有効画素領域がありません。');
+    if (!bounds || !Number.isFinite(bounds.width) || bounds.width <= 0 || !Number.isFinite(bounds.height) || bounds.height <= 0) throw new Error('現在のalphaしきい値では有効な画素がありません。しきい値を下げてください。');
     const edit = validateEdit(rawEdit), maxW = 370, maxH = 320;
     const innerW = Math.max(1, maxW - edit.margin * 2), innerH = Math.max(1, maxH - edit.margin * 2);
     let fit = Math.min(innerW / bounds.width, innerH / bounds.height);
     if (!edit.upscale) fit = Math.min(1, fit);
     const scale = fit * edit.scale, drawWidth = bounds.width * scale, drawHeight = bounds.height * scale;
-    if (drawWidth > maxW || drawHeight > maxH) throw new Error('倍率が大きすぎて370×320pxを超えます。');
-    const width = evenCeil(Math.min(maxW, drawWidth + edit.margin * 2));
-    const height = evenCeil(Math.min(maxH, drawHeight + edit.margin * 2));
-    return { width, height, scale, bounds: { ...bounds }, draw: { x: (width - drawWidth) / 2 + edit.offsetX, y: (height - drawHeight) / 2 + edit.offsetY, width: drawWidth, height: drawHeight } };
+    if (drawWidth + edit.margin * 2 > maxW || drawHeight + edit.margin * 2 > maxH) throw new Error('画像が370 × 320pxの描画範囲を超えています。倍率または余白を小さくしてください。');
+    const width = evenCeil(drawWidth + edit.margin * 2), height = evenCeil(drawHeight + edit.margin * 2);
+    const draw = { x: (width - drawWidth) / 2 + edit.offsetX, y: (height - drawHeight) / 2 + edit.offsetY, width: drawWidth, height: drawHeight };
+    if (draw.x < -1e-7 || draw.y < -1e-7 || draw.x + draw.width > width + 1e-7 || draw.y + draw.height > height + 1e-7) throw new Error('画像が370 × 320pxの描画範囲を超えています。倍率または位置を調整してください。');
+    return { width, height, scale, bounds: { ...bounds }, draw };
   }
-  function fixedPlan(bounds, width, height, rawEdit = {}) {
-    if (!bounds || bounds.width <= 0 || bounds.height <= 0) throw new Error('有効画素領域がありません。');
+  function fixedPlan(bounds, width, height, rawEdit = {}, label = '画像') {
+    if (!bounds || bounds.width <= 0 || bounds.height <= 0) throw new Error('現在のalphaしきい値では有効な画素がありません。しきい値を下げてください。');
     const edit = validateEdit({ margin: 0, ...rawEdit });
     let fit = Math.min(width / bounds.width, height / bounds.height);
     if (!edit.upscale) fit = Math.min(1, fit);
     const scale = fit * edit.scale, drawWidth = bounds.width * scale, drawHeight = bounds.height * scale;
-    if (drawWidth > width || drawHeight > height) throw new Error('倍率が大きすぎて出力範囲を超えます。');
-    return { width, height, scale, bounds: { ...bounds }, draw: { x: (width - drawWidth) / 2 + edit.offsetX, y: (height - drawHeight) / 2 + edit.offsetY, width: drawWidth, height: drawHeight } };
+    const draw = { x: (width - drawWidth) / 2 + edit.offsetX, y: (height - drawHeight) / 2 + edit.offsetY, width: drawWidth, height: drawHeight };
+    if (draw.x < -1e-7 || draw.y < -1e-7 || draw.x + draw.width > width + 1e-7 || draw.y + draw.height > height + 1e-7) throw new Error(`${label}の描画範囲${width} × ${height}pxを超えています。倍率または位置を調整してください。`);
+    return { width, height, scale, bounds: { ...bounds }, draw };
   }
   function parsePng(bytes) {
     const u = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);

@@ -3,6 +3,8 @@
   'use strict';
   const C = window.AtlasCore, R = window.AtlasRenderer, W = window.WorkspaceShell;
   const $ = id => document.getElementById(id);
+  const offsetYToUi = value => value === 0 ? 0 : -value;
+  const offsetYFromUi = value => value === 0 ? 0 : -value;
   const form = $('settingsForm');
   const SETTINGS_KEY = 'sprite-atlas.settings.v1', SEQUENCE_KEY = 'sprite-atlas.sequence.v1';
   // imageは描画用ソース。将来のレイヤー合成もこの境界で用意し、配置計算には持ち込まない。
@@ -188,7 +190,8 @@
     if (syncFields) {
       $('spriteName').value = item.name;
       $('spriteTags').value = item.tags.join(', '); $('spriteTags').setCustomValidity(item.tagError || '');
-      for (const key of ['offsetX', 'offsetY']) { $(key).value = item[key]; $(key).setCustomValidity(''); }
+      $('offsetX').value = item.offsetX; $('offsetX').setCustomValidity('');
+      $('offsetY').value = offsetYToUi(item.offsetY); $('offsetY').setCustomValidity('');
       for (const key of ['groupId', 'animationOrder', 'durationFrames']) $(key).value = item[key];
     }
     $('groupFps').disabled = !item.groupId;
@@ -656,13 +659,13 @@
     if (!item || !['offsetX', 'offsetY'].includes(key)) return;
     const value = event.target.valueAsNumber;
     event.target.setCustomValidity(Number.isSafeInteger(value) ? '' : '整数pxを入力してください。');
-    item[key] = value; rebuild(false);
+    item[key] = key === 'offsetY' ? offsetYFromUi(value) : value; rebuild(false);
     markProjectChanged();
   });
   $('spriteForm').addEventListener('click', event => {
     const button = event.target.closest('button'), item = selectedItem(); if (!button || !item) return;
     const key = button.dataset.action; if (!['offsetX', 'offsetY'].includes(key)) return;
-    const value = (Number.isSafeInteger(item[key]) ? item[key] : 0) + Number(button.dataset.delta);
+    const delta = Number(button.dataset.delta), value = (Number.isSafeInteger(item[key]) ? item[key] : 0) + (key === 'offsetY' ? offsetYFromUi(delta) : delta);
     if (Number.isSafeInteger(value)) { item[key] = value; markProjectChanged(); } rebuild(); button.focus();
   });
   $('imageList').addEventListener('keydown', event => {
